@@ -1,0 +1,21 @@
+# Web Scraping
+nodriver>=0.33
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+
+# AI Embeddings
+requests>=2.31.0
+
+# Feishu SDK
+lark-oapi>=1.2.0
+
+# GitHub Integration
+PyGithub>=2.1.0
+
+# Utilities
+python-dotenv>=1.0.0
+python-dateutil>=2.8.0
+
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
