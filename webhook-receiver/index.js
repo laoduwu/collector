@@ -1,27 +1,23 @@
 /**
- * Cloudflare Workers - 飞书Webhook接收器
- *
- * 功能：
- * 1. 接收飞书机器人消息
- * 2. 验证飞书签名
- * 3. 提取消息中的URL
- * 4. 触发GitHub Actions
+ * Cloudflare Workers - 飞书Webhook接收器（优化版）
  */
-
-// 环境变量配置（在Cloudflare Workers中设置）
-// - FEISHU_VERIFICATION_TOKEN: 飞书验证token
-// - FEISHU_ENCRYPT_KEY: 飞书加密key（可选）
-// - GH_TOKEN: GitHub Personal Access Token
-// - GH_REPO: GitHub仓库名（格式：owner/repo）
 
 addEventListener('fetch', event => {
   event.respondWith(handleRequest(event.request))
 })
 
-/**
- * 处理HTTP请求
- */
 async function handleRequest(request) {
+  // 处理OPTIONS预检请求（CORS）
+  if (request.method === 'OPTIONS') {
+    return new Response(null, {
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type',
+      }
+    })
+  }
+
   // 只接受POST请求
   if (request.method !== 'POST') {
     return new Response('Method Not Allowed', { status: 405 })
@@ -30,20 +26,70 @@ async function handleRequest(request) {
   try {
     // 解析请求体
     const body = await request.json()
+    console.log('Received request:', JSON.stringify(body))
 
-    // 处理飞书事件回调验证
+    // 方式1: 处理飞书事件回调验证（旧格式）
     if (body.type === 'url_verification') {
-      return handleUrlVerification(body)
+      console.log('URL verification (old format):', body.challenge)
+      return new Response(JSON.stringify({
+        challenge: body.challenge
+      }), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*'
+        }
+      })
     }
 
-    // 处理消息事件
+    // 方式2: 处理飞书事件回调验证（新格式）
+    if (body.challenge) {
+      console.log('URL verification (new format):', body.challenge)
+      return new Response(JSON.stringify({
+        challenge: body.challenge
+      }), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*'
+        }
+      })
+    }
+
+    // 处理消息事件（v2.0格式）
     if (body.header && body.header.event_type === 'im.message.receive_v1') {
-      return await handleMessageEvent(body, request)
+      console.log('Message event received')
+      await handleMessageEvent(body)
+      return new Response(JSON.stringify({ code: 0 }), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*'
+        }
+      })
+    }
+
+    // 处理消息事件（旧格式）
+    if (body.event && body.event.message) {
+      console.log('Message event received (old format)')
+      await handleMessageEventOld(body)
+      return new Response(JSON.stringify({ code: 0 }), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*'
+        }
+      })
     }
 
     // 其他事件类型，返回成功
+    console.log('Other event type, returning success')
     return new Response(JSON.stringify({ code: 0 }), {
-      headers: { 'Content-Type': 'application/json' }
+      status: 200,
+      headers: {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*'
+      }
     })
 
   } catch (error) {
@@ -52,77 +98,77 @@ async function handleRequest(request) {
       code: 1,
       message: error.message
     }), {
-      status: 500,
-      headers: { 'Content-Type': 'application/json' }
+      status: 200,  // 仍然返回200，避免飞书重试
+      headers: {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*'
+      }
     })
   }
 }
 
 /**
- * 处理URL验证事件
+ * 处理消息事件（v2.0格式）
  */
-function handleUrlVerification(body) {
-  console.log('Handling URL verification')
-  return new Response(JSON.stringify({
-    challenge: body.challenge
-  }), {
-    headers: { 'Content-Type': 'application/json' }
-  })
+async function handleMessageEvent(body) {
+  try {
+    const event = body.event
+    if (!event || !event.message) {
+      console.log('No message in event')
+      return
+    }
+
+    // 解析消息内容
+    const messageContent = JSON.parse(event.message.content || '{}')
+    const text = messageContent.text || ''
+
+    // 提取URL
+    const url = extractURL(text)
+    if (!url) {
+      console.log('No URL found in message:', text)
+      return
+    }
+
+    console.log('Extracted URL:', url)
+
+    // 触发GitHub Actions
+    await triggerGitHubActions(url)
+  } catch (error) {
+    console.error('Error handling message event:', error)
+    throw error
+  }
 }
 
 /**
- * 处理消息事件
+ * 处理消息事件（旧格式）
  */
-async function handleMessageEvent(body, request) {
-  console.log('Handling message event')
+async function handleMessageEventOld(body) {
+  try {
+    const event = body.event
+    const text = event.text || ''
 
-  // 验证签名（可选，推荐在生产环境启用）
-  // const isValid = await verifySignature(request, body)
-  // if (!isValid) {
-  //   return new Response('Invalid signature', { status: 401 })
-  // }
+    const url = extractURL(text)
+    if (!url) {
+      console.log('No URL found in old format message:', text)
+      return
+    }
 
-  // 提取消息内容
-  const event = body.event
-  if (!event || !event.message) {
-    return new Response(JSON.stringify({ code: 0 }), {
-      headers: { 'Content-Type': 'application/json' }
-    })
+    console.log('Extracted URL (old format):', url)
+    await triggerGitHubActions(url)
+  } catch (error) {
+    console.error('Error handling old format message:', error)
+    throw error
   }
-
-  // 解析消息内容
-  const messageContent = JSON.parse(event.message.content || '{}')
-  const text = messageContent.text || ''
-
-  // 提取URL
-  const url = extractURL(text)
-  if (!url) {
-    console.log('No URL found in message:', text)
-    return new Response(JSON.stringify({ code: 0 }), {
-      headers: { 'Content-Type': 'application/json' }
-    })
-  }
-
-  console.log('Extracted URL:', url)
-
-  // 触发GitHub Actions
-  await triggerGitHubActions(url)
-
-  return new Response(JSON.stringify({ code: 0 }), {
-    headers: { 'Content-Type': 'application/json' }
-  })
 }
 
 /**
  * 从文本中提取URL
  */
 function extractURL(text) {
-  // URL正则表达式
   const urlRegex = /(https?:\/\/[^\s]+)/gi
   const matches = text.match(urlRegex)
 
   if (matches && matches.length > 0) {
-    // 返回第一个URL
     return matches[0]
   }
 
@@ -137,11 +183,11 @@ async function triggerGitHubActions(url) {
   const githubRepo = GH_REPO
 
   if (!githubToken || !githubRepo) {
+    console.error('GitHub configuration missing')
     throw new Error('GitHub configuration missing')
   }
 
   const apiUrl = `https://api.github.com/repos/${githubRepo}/dispatches`
-
   console.log('Triggering GitHub Actions:', apiUrl)
 
   const response = await fetch(apiUrl, {
@@ -168,38 +214,4 @@ async function triggerGitHubActions(url) {
   }
 
   console.log('GitHub Actions triggered successfully')
-}
-
-/**
- * 验证飞书签名（可选）
- */
-async function verifySignature(request, body) {
-  const signature = request.headers.get('X-Lark-Signature')
-  const timestamp = request.headers.get('X-Lark-Request-Timestamp')
-  const nonce = request.headers.get('X-Lark-Request-Nonce')
-
-  if (!signature || !timestamp || !nonce) {
-    return false
-  }
-
-  // 验证时间戳（防重放攻击）
-  const currentTime = Math.floor(Date.now() / 1000)
-  if (Math.abs(currentTime - parseInt(timestamp)) > 300) {
-    return false
-  }
-
-  // 计算签名
-  const verificationToken = FEISHU_VERIFICATION_TOKEN || ''
-  const encryptKey = FEISHU_ENCRYPT_KEY || ''
-
-  const stringToSign = timestamp + nonce + encryptKey + JSON.stringify(body)
-
-  // 使用SHA256计算签名
-  const encoder = new TextEncoder()
-  const data = encoder.encode(stringToSign)
-  const hashBuffer = await crypto.subtle.digest('SHA-256', data)
-  const hashArray = Array.from(new Uint8Array(hashBuffer))
-  const calculatedSignature = hashArray.map(b => b.toString(16).padStart(2, '0')).join('')
-
-  return calculatedSignature === signature
 }
