@@ -9,11 +9,11 @@ class JsDelivrCDN:
     """jsDelivr CDN链接生成器"""
 
     def __init__(self):
-        if not config.GITHUB_REPO:
-            raise ValueError("GITHUB_REPO is not configured")
+        if not config.IMAGE_REPO:
+            raise ValueError("IMAGE_REPO is not configured")
 
-        self.repo_name = config.GITHUB_REPO
-        self.branch = config.GITHUB_BRANCH
+        self.repo_name = config.IMAGE_REPO
+        self.branch = config.IMAGE_BRANCH
 
     def generate_cdn_url(self, github_path: str) -> str:
         """

@@ -99,10 +99,10 @@ jobs:
           JINA_API_KEY: ${{ secrets.JINA_API_KEY }}
           JINA_MODEL: ${{ secrets.JINA_MODEL || 'jina-embeddings-v2-base-zh' }}
           SIMILARITY_THRESHOLD: ${{ secrets.SIMILARITY_THRESHOLD || '0.7' }}
-          # GitHub配置
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
-          GITHUB_REPO: ${{ secrets.GITHUB_REPO }}
-          GITHUB_BRANCH: ${{ secrets.GITHUB_BRANCH || 'main' }}
+          # GitHub配置（图片托管）
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          IMAGE_REPO: ${{ secrets.IMAGE_REPO }}
+          IMAGE_BRANCH: ${{ secrets.IMAGE_BRANCH || 'main' }}
           # 日志配置
           LOG_LEVEL: ${{ secrets.LOG_LEVEL || 'INFO' }}
         run: |

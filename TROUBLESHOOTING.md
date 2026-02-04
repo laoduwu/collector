@@ -218,7 +218,7 @@ GitHub API error: 403 rate limit exceeded
 
 **检查限制**：
 ```bash
-curl -H "Authorization: Bearer $GITHUB_TOKEN" \
+curl -H "Authorization: Bearer $GH_TOKEN" \
   https://api.github.com/rate_limit
 ```
 
@@ -486,8 +486,8 @@ def check_jina():
 def check_github():
     print("检查GitHub连接...")
     try:
-        g = Github(config.GITHUB_TOKEN)
-        repo = g.get_repo(config.GITHUB_REPO)
+        g = Github(config.GH_TOKEN)
+        repo = g.get_repo(config.IMAGE_REPO)
         print(f"✅ GitHub连接成功: {repo.name}")
         return True
     except Exception as e:

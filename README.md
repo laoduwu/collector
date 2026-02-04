@@ -143,9 +143,9 @@ JINA_MODEL=jina-embeddings-v2-base-zh
 SIMILARITY_THRESHOLD=0.7
 
 # GitHub配置
-GITHUB_TOKEN=ghp_xxx
-GITHUB_REPO=yourusername/collector-images
-GITHUB_BRANCH=main
+GH_TOKEN=ghp_xxx
+IMAGE_REPO=yourusername/collector-images
+IMAGE_BRANCH=main
 ```
 
 详见 `.env.example`

@@ -13,14 +13,14 @@ class GitHubUploader:
     """GitHub图片上传器"""
 
     def __init__(self):
-        if not config.GITHUB_TOKEN:
-            raise ValueError("GITHUB_TOKEN is not configured")
-        if not config.GITHUB_REPO:
-            raise ValueError("GITHUB_REPO is not configured")
+        if not config.GH_TOKEN:
+            raise ValueError("GH_TOKEN is not configured")
+        if not config.IMAGE_REPO:
+            raise ValueError("IMAGE_REPO is not configured")
 
-        self.github = Github(config.GITHUB_TOKEN)
-        self.repo_name = config.GITHUB_REPO
-        self.branch = config.GITHUB_BRANCH
+        self.github = Github(config.GH_TOKEN)
+        self.repo_name = config.IMAGE_REPO
+        self.branch = config.IMAGE_BRANCH
         self._repo: Optional[Repository.Repository] = None
 
     @property

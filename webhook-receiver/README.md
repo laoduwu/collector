@@ -26,10 +26,10 @@ wrangler secret put FEISHU_VERIFICATION_TOKEN
 wrangler secret put FEISHU_ENCRYPT_KEY
 
 # GitHub Personal Access Token
-wrangler secret put GITHUB_TOKEN
+wrangler secret put GH_TOKEN
 
 # GitHub仓库名（格式：owner/repo）
-wrangler secret put GITHUB_REPO
+wrangler secret put GH_REPO
 ```
 
 ### 4. 部署

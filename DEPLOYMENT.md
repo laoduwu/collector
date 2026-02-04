@@ -63,7 +63,7 @@ FEISHU_UNORGANIZED_FOLDER_NAME=待整理
 JINA_API_KEY=jina_xxx
 
 GH_TOKEN=ghp_xxx
-GITHUB_REPO=yourusername/collector-images
+IMAGE_REPO=yourusername/collector-images
 ```
 
 ## 第三步：部署Cloudflare Workers
@@ -80,8 +80,8 @@ wrangler login
 
 # 配置secrets
 wrangler secret put FEISHU_VERIFICATION_TOKEN
-wrangler secret put GITHUB_TOKEN
-wrangler secret put GITHUB_REPO
+wrangler secret put GH_TOKEN
+wrangler secret put GH_REPO
 
 # 部署
 wrangler deploy

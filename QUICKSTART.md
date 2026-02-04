@@ -55,8 +55,8 @@ FEISHU_KNOWLEDGE_SPACE_ID=xxx
 JINA_API_KEY=jina_xxx
 
 # GitHub配置（从 https://github.com/settings/tokens 创建）
-GITHUB_TOKEN=ghp_xxx
-GITHUB_REPO=yourusername/collector-images
+GH_TOKEN=ghp_xxx
+IMAGE_REPO=yourusername/collector-images
 ```
 
 ### 如何获取配置

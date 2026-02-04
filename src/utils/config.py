@@ -23,10 +23,10 @@ class Config:
     JINA_MODEL: str = os.getenv('JINA_MODEL', 'jina-embeddings-v2-base-zh')
     SIMILARITY_THRESHOLD: float = float(os.getenv('SIMILARITY_THRESHOLD', '0.7'))
 
-    # GitHub配置
-    GITHUB_TOKEN: str = os.getenv('GITHUB_TOKEN', '')
-    GITHUB_REPO: str = os.getenv('GITHUB_REPO', '')
-    GITHUB_BRANCH: str = os.getenv('GITHUB_BRANCH', 'main')
+    # GitHub配置（图片托管）
+    GH_TOKEN: str = os.getenv('GH_TOKEN', '')
+    IMAGE_REPO: str = os.getenv('IMAGE_REPO', '')
+    IMAGE_BRANCH: str = os.getenv('IMAGE_BRANCH', 'main')
 
     # 日志配置
     LOG_LEVEL: str = os.getenv('LOG_LEVEL', 'INFO')
@@ -51,8 +51,8 @@ class Config:
             'FEISHU_APP_SECRET',
             'FEISHU_KNOWLEDGE_SPACE_ID',
             'JINA_API_KEY',
-            'GITHUB_TOKEN',
-            'GITHUB_REPO',
+            'GH_TOKEN',
+            'IMAGE_REPO',
         ]
 
         for field in required_fields:

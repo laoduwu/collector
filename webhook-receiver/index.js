@@ -11,8 +11,8 @@
 // 环境变量配置（在Cloudflare Workers中设置）
 // - FEISHU_VERIFICATION_TOKEN: 飞书验证token
 // - FEISHU_ENCRYPT_KEY: 飞书加密key（可选）
-// - GITHUB_TOKEN: GitHub Personal Access Token
-// - GITHUB_REPO: GitHub仓库名（格式：owner/repo）
+// - GH_TOKEN: GitHub Personal Access Token
+// - GH_REPO: GitHub仓库名（格式：owner/repo）
 
 addEventListener('fetch', event => {
   event.respondWith(handleRequest(event.request))
@@ -133,8 +133,8 @@ function extractURL(text) {
  * 触发GitHub Actions
  */
 async function triggerGitHubActions(url) {
-  const githubToken = GITHUB_TOKEN
-  const githubRepo = GITHUB_REPO
+  const githubToken = GH_TOKEN
+  const githubRepo = GH_REPO
 
   if (!githubToken || !githubRepo) {
     throw new Error('GitHub configuration missing')
