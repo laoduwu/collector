@@ -127,7 +127,11 @@ class NodriverScraper:
         # 提取标题
         try:
             title_elem = await page.find('h1#activity-name', timeout=10)
-            title = (await title_elem.text).strip()
+            if title_elem:
+                title = title_elem.text.strip() if title_elem.text else "未知标题"
+            else:
+                logger.warning("WeChat title element not found")
+                title = "未知标题"
         except Exception as e:
             logger.warning(f"Failed to find WeChat title: {e}")
             title = "未知标题"
@@ -136,7 +140,8 @@ class NodriverScraper:
         author = None
         try:
             author_elem = await page.find('#js_name', timeout=5)
-            author = (await author_elem.text).strip()
+            if author_elem and author_elem.text:
+                author = author_elem.text.strip()
         except Exception:
             logger.debug("Author not found in WeChat article")
 
@@ -144,7 +149,8 @@ class NodriverScraper:
         publish_date = None
         try:
             date_elem = await page.find('#publish_time', timeout=5)
-            publish_date = (await date_elem.text).strip()
+            if date_elem and date_elem.text:
+                publish_date = date_elem.text.strip()
         except Exception:
             logger.debug("Publish date not found in WeChat article")
 
@@ -152,13 +158,20 @@ class NodriverScraper:
         content = ""
         try:
             content_elem = await page.find('#js_content', timeout=10)
-            content = (await content_elem.text).strip()
+            if content_elem and content_elem.text:
+                content = content_elem.text.strip()
+            else:
+                raise Exception("Content element not found or empty")
         except Exception as e:
             logger.error(f"Failed to extract WeChat content: {e}")
             # 尝试备用选择器
             try:
                 content_elem = await page.find('.rich_media_content', timeout=5)
-                content = (await content_elem.text).strip()
+                if content_elem and content_elem.text:
+                    content = content_elem.text.strip()
+                else:
+                    logger.warning("Using fallback content extraction")
+                    content = "内容提取失败"
             except Exception:
                 logger.warning("Using fallback content extraction")
                 content = "内容提取失败"
@@ -260,10 +273,11 @@ class NodriverScraper:
         for selector in selectors:
             try:
                 elem = await page.find(selector, timeout=2)
-                text = (await elem.text).strip()
-                if text and len(text) > 0:
-                    logger.debug(f"Title found with selector: {selector}")
-                    return text
+                if elem and elem.text:
+                    text = elem.text.strip()
+                    if text and len(text) > 0:
+                        logger.debug(f"Title found with selector: {selector}")
+                        return text
             except Exception:
                 continue
 
@@ -281,9 +295,10 @@ class NodriverScraper:
         for selector in selectors:
             try:
                 elem = await page.find(selector, timeout=1)
-                text = (await elem.text).strip()
-                if text:
-                    return text
+                if elem and elem.text:
+                    text = elem.text.strip()
+                    if text:
+                        return text
             except Exception:
                 continue
 
@@ -296,15 +311,17 @@ class NodriverScraper:
         for selector in selectors:
             try:
                 elem = await page.find(selector, timeout=1)
-                # 尝试获取datetime属性
-                date_str = await elem.get_attribute('datetime')
-                if date_str:
-                    return date_str
+                if elem:
+                    # 尝试获取datetime属性
+                    date_str = await elem.get_attribute('datetime')
+                    if date_str:
+                        return date_str
 
-                # 否则获取文本
-                text = (await elem.text).strip()
-                if text:
-                    return text
+                    # 否则获取文本
+                    if elem.text:
+                        text = elem.text.strip()
+                        if text:
+                            return text
             except Exception:
                 continue
 
@@ -325,17 +342,20 @@ class NodriverScraper:
         for selector in selectors:
             try:
                 elem = await page.find(selector, timeout=2)
-                text = (await elem.text).strip()
-                if text and len(text) > 100:  # 内容应该足够长
-                    logger.debug(f"Content found with selector: {selector}")
-                    return text
+                if elem and elem.text:
+                    text = elem.text.strip()
+                    if text and len(text) > 100:  # 内容应该足够长
+                        logger.debug(f"Content found with selector: {selector}")
+                        return text
             except Exception:
                 continue
 
         # 如果都失败，获取body文本
         try:
             body = await page.find('body')
-            return (await body.text).strip()
+            if body and body.text:
+                return body.text.strip()
+            return "内容提取失败"
         except Exception:
             return "内容提取失败"
 
