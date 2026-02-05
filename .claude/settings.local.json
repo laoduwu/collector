@@ -21,7 +21,9 @@
       "Bash(wrangler deploy:*)",
       "Bash(wrangler secret put:*)",
       "Bash(curl:*)",
-      "Bash(dig:*)"
+      "Bash(dig:*)",
+      "Bash(wrangler secret list:*)",
+      "Bash(git commit:*)"
     ]
   }
 }

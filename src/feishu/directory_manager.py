@@ -74,20 +74,26 @@ class DirectoryManager:
 
                 # 解析节点
                 if response.data.items:
+                    logger.info(f"API returned {len(response.data.items)} items")
                     for node in response.data.items:
-                        # 只收集文件夹类型的节点
-                        if node.obj_type == 'wiki':
-                            directory = Directory(
-                                node_token=node.node_token,
-                                name=node.title,
-                                is_leaf=not node.has_child,  # 没有子节点即为叶子节点
-                                parent_token=node.parent_node_token
-                            )
-                            directories.append(directory)
-                            logger.debug(
-                                f"Found directory: {directory.name} "
-                                f"(leaf={directory.is_leaf})"
-                            )
+                        logger.debug(
+                            f"Node: title={node.title}, obj_type={node.obj_type}, "
+                            f"node_token={node.node_token}, has_child={node.has_child}"
+                        )
+                        # 收集所有节点（包括 doc, docx, wiki 等类型）
+                        directory = Directory(
+                            node_token=node.node_token,
+                            name=node.title,
+                            is_leaf=not node.has_child,  # 没有子节点即为叶子节点
+                            parent_token=node.parent_node_token
+                        )
+                        directories.append(directory)
+                        logger.info(
+                            f"Found directory: {directory.name} "
+                            f"(type={node.obj_type}, leaf={directory.is_leaf})"
+                        )
+                else:
+                    logger.warning("API returned no items (response.data.items is empty or None)")
 
                 # 检查是否有下一页
                 if response.data.has_more:
