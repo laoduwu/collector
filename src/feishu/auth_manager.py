@@ -3,8 +3,8 @@ import time
 from typing import Optional
 import lark_oapi as lark
 from lark_oapi.api.auth.v3 import InternalTenantAccessTokenRequest
-from ..utils.logger import logger
-from ..utils.config import config
+from utils.logger import logger
+from utils.config import config
 
 
 class AuthManager:

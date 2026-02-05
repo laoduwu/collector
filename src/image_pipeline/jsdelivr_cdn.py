@@ -1,8 +1,8 @@
 """jsDelivr CDN链接生成器"""
 from typing import List, Tuple
 from urllib.parse import quote
-from ..utils.logger import logger
-from ..utils.config import config
+from utils.logger import logger
+from utils.config import config
 
 
 class JsDelivrCDN:

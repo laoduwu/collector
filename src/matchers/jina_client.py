@@ -1,9 +1,9 @@
 """Jina AI Embeddings客户端"""
 import requests
 from typing import List, Optional
-from ..utils.logger import logger
-from ..utils.config import config
-from ..utils.retry import retry_with_backoff
+from utils.logger import logger
+from utils.config import config
+from utils.retry import retry_with_backoff
 
 
 class JinaAPIQuotaError(Exception):

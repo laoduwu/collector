@@ -3,9 +3,9 @@ import os
 import hashlib
 from typing import List, Tuple
 import requests
-from ..utils.logger import logger
-from ..utils.config import config
-from ..utils.retry import retry_with_backoff
+from utils.logger import logger
+from utils.config import config
+from utils.retry import retry_with_backoff
 
 
 class ImageDownloader:

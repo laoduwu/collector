@@ -4,9 +4,9 @@ import base64
 from datetime import datetime
 from typing import Tuple, Optional
 from github import Github, GithubException, Repository
-from ..utils.logger import logger
-from ..utils.config import config
-from ..utils.retry import retry_with_backoff
+from utils.logger import logger
+from utils.config import config
+from utils.retry import retry_with_backoff
 
 
 class GitHubUploader:

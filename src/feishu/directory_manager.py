@@ -3,9 +3,9 @@ from typing import List, Optional
 import lark_oapi as lark
 from lark_oapi.api.wiki.v2 import ListSpaceNodeRequest, ListSpaceNodeResponse
 from .auth_manager import AuthManager
-from ..matchers.types import Directory
-from ..utils.logger import logger
-from ..utils.config import config
+from matchers.types import Directory
+from utils.logger import logger
+from utils.config import config
 
 
 class DirectoryManager:

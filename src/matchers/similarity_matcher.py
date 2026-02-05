@@ -3,8 +3,8 @@ import math
 from typing import List, Optional
 from .types import Directory, MatchResult
 from .jina_client import JinaClient, JinaAPIQuotaError
-from ..utils.logger import logger
-from ..utils.config import config
+from utils.logger import logger
+from utils.config import config
 
 
 class SimilarityMatcher:

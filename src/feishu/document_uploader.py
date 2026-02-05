@@ -7,8 +7,8 @@ from lark_oapi.api.docx.v1 import (
     CreateDocumentResponse
 )
 from .auth_manager import AuthManager
-from ..matchers.types import Directory
-from ..utils.logger import logger
+from matchers.types import Directory
+from utils.logger import logger
 
 
 class DocumentUploader:

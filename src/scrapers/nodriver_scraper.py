@@ -4,8 +4,8 @@ import re
 from typing import Optional, Dict, List
 from urllib.parse import urlparse
 import nodriver as uc
-from ..utils.logger import logger
-from ..utils.retry import async_retry_with_backoff
+from utils.logger import logger
+from utils.retry import async_retry_with_backoff
 
 
 class ArticleData:
