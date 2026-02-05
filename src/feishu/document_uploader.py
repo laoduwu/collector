@@ -100,11 +100,16 @@ class DocumentUploader:
             )
 
             # 使用 wiki API 创建知识库节点
+            # space_id 必须是字符串格式
+            space_id_str = str(self.space_id)
+            logger.info(f"Creating wiki node with space_id={space_id_str}, parent={directory.node_token}")
+
             request = CreateSpaceNodeRequest.builder() \
-                .space_id(self.space_id) \
+                .space_id(space_id_str) \
                 .request_body(
                     Node.builder()
                     .obj_type("docx")  # 创建新版文档
+                    .node_type("origin")  # 原创节点
                     .parent_node_token(directory.node_token)
                     .title(title)
                     .build()
