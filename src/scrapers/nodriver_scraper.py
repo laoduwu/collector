@@ -68,9 +68,19 @@ class NodriverScraper:
 
         try:
             # 启动浏览器（支持容器环境/root用户）
+            # 配置浏览器参数以兼容Docker/GitHub Actions环境
+            browser_args = [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--disable-software-rasterizer',
+                '--disable-extensions'
+            ]
+
             self.browser = await uc.start(
                 headless=True,
-                no_sandbox=True
+                browser_args=browser_args
             )
             page = await self.browser.get(url)
 
