@@ -5,7 +5,20 @@ from typing import Optional
 
 from utils.logger import logger
 from utils.config import config
-from scrapers.nodriver_scraper import NodriverScraper, ArticleData
+
+# 优先使用Playwright（支持Python 3.9+），如果不可用则回退到Nodriver
+try:
+    from scrapers.playwright_scraper import PlaywrightScraper, ArticleData
+    SCRAPER_TYPE = "playwright"
+    logger.info("Using Playwright scraper")
+except ImportError:
+    try:
+        from scrapers.nodriver_scraper import NodriverScraper as PlaywrightScraper, ArticleData
+        SCRAPER_TYPE = "nodriver"
+        logger.info("Using Nodriver scraper (Playwright not available)")
+    except ImportError:
+        raise ImportError("No scraper available. Install playwright or nodriver.")
+
 from scrapers.image_downloader import ImageDownloader
 from image_pipeline.github_uploader import GitHubUploader
 from image_pipeline.jsdelivr_cdn import JsDelivrCDN
@@ -34,7 +47,7 @@ class ArticleCollector:
         config.ensure_directories()
 
         # 初始化组件
-        self.scraper = NodriverScraper()
+        self.scraper = PlaywrightScraper(headless=True)
         self.image_downloader = ImageDownloader()
         self.github_uploader = GitHubUploader()
         self.cdn_generator = JsDelivrCDN()
