@@ -67,10 +67,10 @@ class NodriverScraper:
         logger.info(f"Starting to scrape: {url}")
 
         try:
-            # 启动浏览器（支持容器环境）
+            # 启动浏览器（支持容器环境/root用户）
             self.browser = await uc.start(
                 headless=True,
-                browser_args=['--no-sandbox', '--disable-setuid-sandbox']
+                no_sandbox=True
             )
             page = await self.browser.get(url)
 

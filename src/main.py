@@ -152,6 +152,9 @@ class ArticleCollector:
         Returns:
             匹配结果（保证有返回值）
         """
+        # 初始化unorganized变量，避免异常情况下未定义
+        unorganized = None
+
         try:
             # 获取可匹配的目录和兜底目录
             matchable_dirs, unorganized = self.directory_manager.get_matchable_directories()

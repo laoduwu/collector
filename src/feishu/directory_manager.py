@@ -14,11 +14,15 @@ class DirectoryManager:
     def __init__(self, auth_manager: AuthManager):
         self.auth_manager = auth_manager
         self.client = auth_manager.client
-        self.space_id = config.FEISHU_KNOWLEDGE_SPACE_ID
-        self.unorganized_folder_name = config.FEISHU_UNORGANIZED_FOLDER_NAME
-
-        if not self.space_id:
+        # 飞书API要求space_id为整数
+        space_id_str = config.FEISHU_KNOWLEDGE_SPACE_ID
+        if not space_id_str:
             raise ValueError("FEISHU_KNOWLEDGE_SPACE_ID must be configured")
+        try:
+            self.space_id = int(space_id_str)
+        except ValueError:
+            raise ValueError(f"FEISHU_KNOWLEDGE_SPACE_ID must be a valid integer, got: {space_id_str}")
+        self.unorganized_folder_name = config.FEISHU_UNORGANIZED_FOLDER_NAME
 
     def get_all_directories(self) -> List[Directory]:
         """
