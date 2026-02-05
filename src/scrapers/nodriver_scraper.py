@@ -211,8 +211,17 @@ class NodriverScraper:
             try:
                 return await self._scrape_with_jina_reader(url)
             except Exception as e:
-                logger.error(f"Jina Reader also failed: {e}")
-                # 继续尝试原始方法
+                logger.warning(f"Jina Reader also failed: {e}")
+                # 返回带有原文链接的基本信息
+                logger.info("All scraping methods failed, returning link-only article")
+                return ArticleData(
+                    url=url,
+                    title="[微信文章] 请点击原文链接查看",
+                    content=f"由于微信反爬机制限制，无法自动抓取文章内容。\n\n请点击原文链接查看：\n{url}",
+                    author=None,
+                    publish_date=None,
+                    images=[]
+                )
 
         # 额外等待确保 JavaScript 渲染完成
         await asyncio.sleep(2)
