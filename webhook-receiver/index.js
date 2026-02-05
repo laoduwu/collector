@@ -1,21 +1,68 @@
 /**
- * Cloudflare Workers - 飞书Webhook接收器（优化版）
+ * Cloudflare Workers - 飞书Webhook接收器
+ * 支持 Encrypt Key 加密解密
  */
 
 addEventListener('fetch', event => {
   event.respondWith(handleRequest(event.request))
 })
 
+/**
+ * 解密飞书加密消息
+ * @param {string} encrypt - Base64编码的加密字符串
+ * @param {string} encryptKey - 飞书应用的 Encrypt Key
+ * @returns {Promise<object>} 解密后的JSON对象
+ */
+async function decryptFeishuMessage(encrypt, encryptKey) {
+  // 1. SHA-256 哈希 Encrypt Key 得到 32 字节密钥
+  const encoder = new TextEncoder()
+  const keyData = encoder.encode(encryptKey)
+  const hashBuffer = await crypto.subtle.digest('SHA-256', keyData)
+
+  // 2. Base64 解码加密字符串
+  const encryptedBuffer = Uint8Array.from(atob(encrypt), c => c.charCodeAt(0))
+
+  // 3. 前16字节是IV，剩余是加密数据
+  const iv = encryptedBuffer.slice(0, 16)
+  const encryptedData = encryptedBuffer.slice(16)
+
+  // 4. 导入密钥
+  const cryptoKey = await crypto.subtle.importKey(
+    'raw',
+    hashBuffer,
+    { name: 'AES-CBC' },
+    false,
+    ['decrypt']
+  )
+
+  // 5. AES-256-CBC 解密
+  const decryptedBuffer = await crypto.subtle.decrypt(
+    { name: 'AES-CBC', iv: iv },
+    cryptoKey,
+    encryptedData
+  )
+
+  // 6. 转换为字符串并解析JSON
+  const decoder = new TextDecoder()
+  let decryptedText = decoder.decode(decryptedBuffer)
+
+  // 7. 移除PKCS7填充（最后一个字节表示填充长度）
+  const paddingLength = decryptedText.charCodeAt(decryptedText.length - 1)
+  if (paddingLength > 0 && paddingLength <= 16) {
+    decryptedText = decryptedText.slice(0, -paddingLength)
+  }
+
+  console.log('Decrypted message:', decryptedText)
+  return JSON.parse(decryptedText)
+}
+
 async function handleRequest(request) {
-  // 立即记录所有请求
   console.log(`===== REQUEST RECEIVED =====`)
   console.log(`Method: ${request.method}`)
   console.log(`URL: ${request.url}`)
-  console.log(`Headers:`, JSON.stringify([...request.headers.entries()]))
 
   // 处理OPTIONS预检请求（CORS）
   if (request.method === 'OPTIONS') {
-    console.log('Handling OPTIONS request')
     return new Response(null, {
       headers: {
         'Access-Control-Allow-Origin': '*',
@@ -25,71 +72,64 @@ async function handleRequest(request) {
     })
   }
 
-  // 添加GET请求支持用于测试
+  // GET请求用于测试
   if (request.method === 'GET') {
-    console.log('Handling GET request (test endpoint)')
     return new Response(JSON.stringify({
       status: 'Worker is running!',
       timestamp: new Date().toISOString(),
-      message: 'This Feishu webhook receiver is working correctly.'
+      message: 'Feishu webhook receiver with encryption support.'
     }), {
       status: 200,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*'
-      }
+      headers: { 'Content-Type': 'application/json' }
     })
   }
 
-  // 只接受POST请求（用于实际webhook）
+  // 只接受POST请求
   if (request.method !== 'POST') {
-    console.log(`Rejecting ${request.method} request`)
     return new Response('Method Not Allowed', { status: 405 })
   }
 
   try {
     // 解析请求体
-    const body = await request.json()
-    console.log('Received request:', JSON.stringify(body))
+    let body = await request.json()
+    console.log('Raw request body:', JSON.stringify(body))
 
-    // 方式1: 处理飞书事件回调验证（旧格式）
-    if (body.type === 'url_verification') {
-      console.log('URL verification (old format):', body.challenge)
-      return new Response(JSON.stringify({
-        challenge: body.challenge
-      }), {
-        status: 200,
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*'
-        }
-      })
+    // 检查是否为加密消息
+    if (body.encrypt && typeof FEISHU_ENCRYPT_KEY !== 'undefined' && FEISHU_ENCRYPT_KEY) {
+      console.log('Encrypted message detected, decrypting...')
+      try {
+        body = await decryptFeishuMessage(body.encrypt, FEISHU_ENCRYPT_KEY)
+        console.log('Decryption successful')
+      } catch (decryptError) {
+        console.error('Decryption failed:', decryptError)
+        return new Response(JSON.stringify({
+          code: 1,
+          message: 'Decryption failed: ' + decryptError.message
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        })
+      }
     }
 
-    // 方式2: 处理飞书事件回调验证（新格式）
-    if (body.challenge) {
-      console.log('URL verification (new format):', body.challenge)
+    // 处理 URL 验证（challenge）
+    if (body.type === 'url_verification' || body.challenge) {
+      console.log('URL verification, challenge:', body.challenge)
       return new Response(JSON.stringify({
         challenge: body.challenge
       }), {
         status: 200,
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*'
-        }
+        headers: { 'Content-Type': 'application/json' }
       })
     }
 
     // 处理消息事件（v2.0格式）
     if (body.header && body.header.event_type === 'im.message.receive_v1') {
-      console.log('Message event received')
+      console.log('Message event received (v2.0)')
       await handleMessageEvent(body)
       return new Response(JSON.stringify({ code: 0 }), {
         status: 200,
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*'
-        }
+        headers: { 'Content-Type': 'application/json' }
       })
     }
 
@@ -99,21 +139,15 @@ async function handleRequest(request) {
       await handleMessageEventOld(body)
       return new Response(JSON.stringify({ code: 0 }), {
         status: 200,
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': '*'
-        }
+        headers: { 'Content-Type': 'application/json' }
       })
     }
 
-    // 其他事件类型，返回成功
+    // 其他事件类型
     console.log('Other event type, returning success')
     return new Response(JSON.stringify({ code: 0 }), {
       status: 200,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*'
-      }
+      headers: { 'Content-Type': 'application/json' }
     })
 
   } catch (error) {
@@ -122,11 +156,8 @@ async function handleRequest(request) {
       code: 1,
       message: error.message
     }), {
-      status: 200,  // 仍然返回200，避免飞书重试
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*'
-      }
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
     })
   }
 }
@@ -135,54 +166,40 @@ async function handleRequest(request) {
  * 处理消息事件（v2.0格式）
  */
 async function handleMessageEvent(body) {
-  try {
-    const event = body.event
-    if (!event || !event.message) {
-      console.log('No message in event')
-      return
-    }
-
-    // 解析消息内容
-    const messageContent = JSON.parse(event.message.content || '{}')
-    const text = messageContent.text || ''
-
-    // 提取URL
-    const url = extractURL(text)
-    if (!url) {
-      console.log('No URL found in message:', text)
-      return
-    }
-
-    console.log('Extracted URL:', url)
-
-    // 触发GitHub Actions
-    await triggerGitHubActions(url)
-  } catch (error) {
-    console.error('Error handling message event:', error)
-    throw error
+  const event = body.event
+  if (!event || !event.message) {
+    console.log('No message in event')
+    return
   }
+
+  const messageContent = JSON.parse(event.message.content || '{}')
+  const text = messageContent.text || ''
+
+  const url = extractURL(text)
+  if (!url) {
+    console.log('No URL found in message:', text)
+    return
+  }
+
+  console.log('Extracted URL:', url)
+  await triggerGitHubActions(url)
 }
 
 /**
  * 处理消息事件（旧格式）
  */
 async function handleMessageEventOld(body) {
-  try {
-    const event = body.event
-    const text = event.text || ''
+  const event = body.event
+  const text = event.text || ''
 
-    const url = extractURL(text)
-    if (!url) {
-      console.log('No URL found in old format message:', text)
-      return
-    }
-
-    console.log('Extracted URL (old format):', url)
-    await triggerGitHubActions(url)
-  } catch (error) {
-    console.error('Error handling old format message:', error)
-    throw error
+  const url = extractURL(text)
+  if (!url) {
+    console.log('No URL found in message:', text)
+    return
   }
+
+  console.log('Extracted URL:', url)
+  await triggerGitHubActions(url)
 }
 
 /**
@@ -191,20 +208,15 @@ async function handleMessageEventOld(body) {
 function extractURL(text) {
   const urlRegex = /(https?:\/\/[^\s]+)/gi
   const matches = text.match(urlRegex)
-
-  if (matches && matches.length > 0) {
-    return matches[0]
-  }
-
-  return null
+  return matches && matches.length > 0 ? matches[0] : null
 }
 
 /**
  * 触发GitHub Actions
  */
 async function triggerGitHubActions(url) {
-  const githubToken = GH_TOKEN
-  const githubRepo = GH_REPO
+  const githubToken = typeof GH_TOKEN !== 'undefined' ? GH_TOKEN : ''
+  const githubRepo = typeof GH_REPO !== 'undefined' ? GH_REPO : ''
 
   if (!githubToken || !githubRepo) {
     console.error('GitHub configuration missing')

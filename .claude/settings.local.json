@@ -7,7 +7,21 @@
       "WebFetch(domain:docs.github.com)",
       "WebFetch(domain:open.feishu.cn)",
       "Bash(find:*)",
-      "WebFetch(domain:developers.cloudflare.com)"
+      "WebFetch(domain:developers.cloudflare.com)",
+      "Bash(gh:*)",
+      "Bash(brew:*)",
+      "Bash(python3:*)",
+      "WebFetch(domain:ultrafunkamsterdam.github.io)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nFix nodriver element.text property access\n\n- element.text is a property, not an async method, don''t use await\n- Check if element is None before accessing .text\n- Add proper null checks throughout the scraper\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git push:*)",
+      "WebFetch(domain:www.jijyun.cn)",
+      "WebFetch(domain:blog.csdn.net)",
+      "WebFetch(domain:www.feishu.cn)",
+      "Bash(wrangler deploy:*)",
+      "Bash(wrangler secret put:*)",
+      "Bash(curl:*)",
+      "Bash(dig:*)"
     ]
   }
 }
