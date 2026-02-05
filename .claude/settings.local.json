@@ -6,7 +6,8 @@
       "WebFetch(domain:github.com)",
       "WebFetch(domain:docs.github.com)",
       "WebFetch(domain:open.feishu.cn)",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "WebFetch(domain:developers.cloudflare.com)"
     ]
   }
 }

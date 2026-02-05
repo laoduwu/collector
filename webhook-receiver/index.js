@@ -7,19 +7,43 @@ addEventListener('fetch', event => {
 })
 
 async function handleRequest(request) {
+  // 立即记录所有请求
+  console.log(`===== REQUEST RECEIVED =====`)
+  console.log(`Method: ${request.method}`)
+  console.log(`URL: ${request.url}`)
+  console.log(`Headers:`, JSON.stringify([...request.headers.entries()]))
+
   // 处理OPTIONS预检请求（CORS）
   if (request.method === 'OPTIONS') {
+    console.log('Handling OPTIONS request')
     return new Response(null, {
       headers: {
         'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type',
       }
     })
   }
 
-  // 只接受POST请求
+  // 添加GET请求支持用于测试
+  if (request.method === 'GET') {
+    console.log('Handling GET request (test endpoint)')
+    return new Response(JSON.stringify({
+      status: 'Worker is running!',
+      timestamp: new Date().toISOString(),
+      message: 'This Feishu webhook receiver is working correctly.'
+    }), {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*'
+      }
+    })
+  }
+
+  // 只接受POST请求（用于实际webhook）
   if (request.method !== 'POST') {
+    console.log(`Rejecting ${request.method} request`)
     return new Response('Method Not Allowed', { status: 405 })
   }
 
