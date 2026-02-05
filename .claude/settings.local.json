@@ -23,7 +23,9 @@
       "Bash(curl:*)",
       "Bash(dig:*)",
       "Bash(wrangler secret list:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(source:*)",
+      "Bash(pip3 install:*)"
     ]
   }
 }

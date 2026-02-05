@@ -1,14 +1,14 @@
 """飞书文档上传器"""
 from typing import Optional
 import lark_oapi as lark
-from lark_oapi.api.docx.v1 import (
-    CreateDocumentRequest,
-    CreateDocumentRequestBody,
-    CreateDocumentResponse
+from lark_oapi.api.wiki.v2 import (
+    CreateSpaceNodeRequest,
+    Node
 )
 from .auth_manager import AuthManager
 from matchers.types import Directory
 from utils.logger import logger
+from utils.config import config
 
 
 class DocumentUploader:
@@ -17,6 +17,7 @@ class DocumentUploader:
     def __init__(self, auth_manager: AuthManager):
         self.auth_manager = auth_manager
         self.client = auth_manager.client
+        self.space_id = config.FEISHU_KNOWLEDGE_SPACE_ID
 
     def _build_document_content(
         self,
@@ -70,7 +71,7 @@ class DocumentUploader:
         source_url: Optional[str] = None
     ) -> Optional[str]:
         """
-        在指定目录创建文档
+        在指定目录创建文档（使用知识库 wiki API）
 
         Args:
             directory: 目标目录
@@ -89,7 +90,7 @@ class DocumentUploader:
         logger.info(f"Creating document '{title}' in directory '{directory.name}'")
 
         try:
-            # 构建文档内容
+            # 构建文档内容（用于后续添加到文档）
             doc_content = self._build_document_content(
                 title=title,
                 content=content,
@@ -98,36 +99,44 @@ class DocumentUploader:
                 source_url=source_url
             )
 
-            # 构建请求
-            request = CreateDocumentRequest.builder() \
+            # 使用 wiki API 创建知识库节点
+            request = CreateSpaceNodeRequest.builder() \
+                .space_id(self.space_id) \
                 .request_body(
-                    CreateDocumentRequestBody.builder()
-                    .folder_token(directory.node_token)
+                    Node.builder()
+                    .obj_type("docx")  # 创建新版文档
+                    .parent_node_token(directory.node_token)
                     .title(title)
-                    .content(doc_content)
                     .build()
                 ) \
                 .build()
 
             # 发起请求
-            response: CreateDocumentResponse = self.client.docx.v1.document.create(request)
+            response = self.client.wiki.v2.space_node.create(request)
 
             if not response.success():
                 logger.error(
-                    f"Failed to create document: code={response.code}, "
+                    f"Failed to create wiki node: code={response.code}, "
                     f"msg={response.msg}, log_id={response.get_log_id()}"
                 )
-                raise Exception(f"Failed to create Feishu document: {response.msg}")
+                raise Exception(f"Failed to create wiki node: {response.msg}")
 
-            # 获取文档URL
-            doc_url = response.data.document.url if response.data.document else None
+            # 获取创建的节点信息
+            node = response.data.node if response.data else None
+            if node:
+                # 构建文档 URL
+                doc_url = f"https://feishu.cn/wiki/{node.node_token}"
+                logger.info(f"Wiki node created successfully: {doc_url}")
+                logger.info(f"  - node_token: {node.node_token}")
+                logger.info(f"  - obj_token: {node.obj_token}")
 
-            if doc_url:
-                logger.info(f"Document created successfully: {doc_url}")
+                # TODO: 后续可以使用 docx block API 添加内容
+                # 目前先创建空文档，内容通过标题体现
+
+                return doc_url
             else:
-                logger.warning("Document created but URL not available")
-
-            return doc_url
+                logger.warning("Wiki node created but node info not available")
+                return None
 
         except Exception as e:
             logger.error(f"Error creating document: {str(e)}")
