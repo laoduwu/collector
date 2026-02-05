@@ -14,14 +14,44 @@ class DirectoryManager:
     def __init__(self, auth_manager: AuthManager):
         self.auth_manager = auth_manager
         self.client = auth_manager.client
-        # 飞书API要求space_id为整数
+        # 飞书API要求space_id为整数（纯数字）
         space_id_str = config.FEISHU_KNOWLEDGE_SPACE_ID
         if not space_id_str:
             raise ValueError("FEISHU_KNOWLEDGE_SPACE_ID must be configured")
+
+        # 去除可能的空格
+        space_id_str = space_id_str.strip()
+
         try:
             self.space_id = int(space_id_str)
+            logger.info(f"Knowledge space ID: {self.space_id}")
         except ValueError:
-            raise ValueError(f"FEISHU_KNOWLEDGE_SPACE_ID must be a valid integer, got: {space_id_str}")
+            # 提供详细的错误诊断
+            error_msg = (
+                f"\n{'='*80}\n"
+                f"❌ FEISHU_KNOWLEDGE_SPACE_ID配置错误！\n"
+                f"{'='*80}\n"
+                f"当前配置值: {space_id_str}\n"
+                f"错误原因: 该值不是纯数字，无法转换为整数\n\n"
+                f"常见错误:\n"
+                f"  1. 配置了node_token而不是space_id (如: wikcnXxx)\n"
+                f"  2. 配置了doc_token而不是space_id (如: doxcnXxx)\n"
+                f"  3. 包含了额外的字符或空格\n\n"
+                f"✅ 如何获取正确的space_id:\n"
+                f"  方法1: 从知识库URL获取\n"
+                f"    - URL格式: https://xxx.feishu.cn/wiki/[space_id]\n"
+                f"    - space_id是URL中的纯数字部分\n"
+                f"    - 示例: https://xxx.feishu.cn/wiki/1234567890\n"
+                f"           → space_id = 1234567890\n\n"
+                f"  方法2: 使用飞书开放平台API\n"
+                f"    - 调用获取知识库列表API\n"
+                f"    - 从返回结果中找到space_id字段\n\n"
+                f"请修改GitHub Secrets中的FEISHU_KNOWLEDGE_SPACE_ID配置为纯数字！\n"
+                f"{'='*80}\n"
+            )
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+
         self.unorganized_folder_name = config.FEISHU_UNORGANIZED_FOLDER_NAME
 
     def get_all_directories(self) -> List[Directory]:
