@@ -121,60 +121,126 @@ class NodriverScraper:
         """
         logger.info("Scraping WeChat article...")
 
-        # 等待内容加载
+        # 等待页面初始加载
+        await asyncio.sleep(3)
+
+        # 滚动页面触发懒加载
+        try:
+            await page.scroll_down(500)
+            await asyncio.sleep(1)
+            await page.scroll_up(500)
+            await asyncio.sleep(1)
+        except Exception as e:
+            logger.warning(f"Scroll failed: {e}")
+
+        # 获取页面标题用于诊断
+        try:
+            page_title = await page.evaluate("document.title")
+            logger.info(f"Page title: {page_title}")
+        except Exception as e:
+            logger.warning(f"Failed to get page title: {e}")
+
+        # 检查是否是验证页面
+        try:
+            page_html = await page.evaluate("document.body.innerHTML.substring(0, 500)")
+            logger.debug(f"Page HTML preview: {page_html}")
+            if "验证" in page_html or "请在微信客户端打开" in page_html:
+                logger.warning("Detected WeChat verification or client-only page")
+        except Exception as e:
+            logger.warning(f"Failed to check page content: {e}")
+
+        # 额外等待确保 JavaScript 渲染完成
         await asyncio.sleep(2)
 
-        # 提取标题
+        # 提取标题 - 使用 JavaScript 直接获取更可靠
         try:
-            title_elem = await page.find('h1#activity-name', timeout=10)
-            if title_elem:
-                title = title_elem.text.strip() if title_elem.text else "未知标题"
+            # 先尝试 JavaScript 方式
+            title = await page.evaluate("""
+                (() => {
+                    const el = document.getElementById('activity-name');
+                    return el ? el.innerText.trim() : null;
+                })()
+            """)
+            if not title:
+                # 备用：尝试其他可能的选择器
+                title = await page.evaluate("""
+                    (() => {
+                        const el = document.querySelector('h1.rich_media_title') ||
+                                   document.querySelector('h2.rich_media_title') ||
+                                   document.querySelector('.rich_media_title');
+                        return el ? el.innerText.trim() : null;
+                    })()
+                """)
+            if title:
+                logger.info(f"Found title via JS: {title}")
             else:
-                logger.warning("WeChat title element not found")
+                logger.warning("WeChat title element not found via JS")
                 title = "未知标题"
         except Exception as e:
             logger.warning(f"Failed to find WeChat title: {e}")
             title = "未知标题"
 
-        # 提取作者
+        # 提取作者 - 使用 JavaScript
         author = None
         try:
-            author_elem = await page.find('#js_name', timeout=5)
-            if author_elem and author_elem.text:
-                author = author_elem.text.strip()
-        except Exception:
-            logger.debug("Author not found in WeChat article")
+            author = await page.evaluate("""
+                (() => {
+                    const el = document.getElementById('js_name') ||
+                               document.querySelector('.rich_media_meta_text') ||
+                               document.querySelector('a.weui-wa-hotarea');
+                    return el ? el.innerText.trim() : null;
+                })()
+            """)
+            if author:
+                logger.info(f"Found author: {author}")
+        except Exception as e:
+            logger.debug(f"Author not found: {e}")
 
-        # 提取发布日期
+        # 提取发布日期 - 使用 JavaScript
         publish_date = None
         try:
-            date_elem = await page.find('#publish_time', timeout=5)
-            if date_elem and date_elem.text:
-                publish_date = date_elem.text.strip()
-        except Exception:
-            logger.debug("Publish date not found in WeChat article")
+            publish_date = await page.evaluate("""
+                (() => {
+                    const el = document.getElementById('publish_time') ||
+                               document.querySelector('.rich_media_meta_text em.rich_media_meta_text');
+                    return el ? el.innerText.trim() : null;
+                })()
+            """)
+            if publish_date:
+                logger.info(f"Found publish_date: {publish_date}")
+        except Exception as e:
+            logger.debug(f"Publish date not found: {e}")
 
-        # 提取正文内容
+        # 提取正文内容 - 使用 JavaScript 直接获取
         content = ""
         try:
-            content_elem = await page.find('#js_content', timeout=10)
-            if content_elem and content_elem.text:
-                content = content_elem.text.strip()
+            content = await page.evaluate("""
+                (() => {
+                    const el = document.getElementById('js_content') ||
+                               document.querySelector('.rich_media_content');
+                    if (!el) return null;
+                    // 获取纯文本内容
+                    return el.innerText.trim();
+                })()
+            """)
+            if content:
+                logger.info(f"Found content via JS, length: {len(content)}")
             else:
-                raise Exception("Content element not found or empty")
+                logger.warning("Content element not found or empty via JS")
+                # 尝试获取整个文章区域
+                content = await page.evaluate("""
+                    (() => {
+                        const el = document.querySelector('.rich_media_area_primary') ||
+                                   document.querySelector('article') ||
+                                   document.querySelector('#img-content');
+                        return el ? el.innerText.trim() : '内容提取失败';
+                    })()
+                """)
+                if content and content != '内容提取失败':
+                    logger.info(f"Found content via fallback JS, length: {len(content)}")
         except Exception as e:
-            logger.error(f"Failed to extract WeChat content: {e}")
-            # 尝试备用选择器
-            try:
-                content_elem = await page.find('.rich_media_content', timeout=5)
-                if content_elem and content_elem.text:
-                    content = content_elem.text.strip()
-                else:
-                    logger.warning("Using fallback content extraction")
-                    content = "内容提取失败"
-            except Exception:
-                logger.warning("Using fallback content extraction")
-                content = "内容提取失败"
+            logger.error(f"Failed to extract WeChat content via JS: {e}")
+            content = "内容提取失败"
 
         # 提取图片
         images = await self._extract_weixin_images(page)

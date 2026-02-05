@@ -25,7 +25,8 @@
       "Bash(wrangler secret list:*)",
       "Bash(git commit:*)",
       "Bash(source:*)",
-      "Bash(pip3 install:*)"
+      "Bash(pip3 install:*)",
+      "WebFetch(domain:www.cnblogs.com)"
     ]
   }
 }
