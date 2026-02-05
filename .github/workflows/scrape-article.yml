@@ -63,8 +63,7 @@ jobs:
           # 日志配置
           LOG_LEVEL: ${{ secrets.LOG_LEVEL || 'INFO' }}
         run: |
-          cd src
-          python main.py "$ARTICLE_URL"
+          python -m src.main "$ARTICLE_URL"
 
       - name: Upload logs on failure
         if: failure()
