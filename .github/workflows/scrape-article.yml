@@ -25,21 +25,16 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Install Chrome
-        run: |
-          # 使用官方脚本安装Chrome（兼容Ubuntu 24.04）
-          wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-          sudo apt-get update
-          sudo apt-get install -y ./google-chrome-stable_current_amd64.deb
-          rm google-chrome-stable_current_amd64.deb
-
-          # 验证安装
-          google-chrome --version
-
       - name: Install Python dependencies
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: Install Playwright browsers
+        run: |
+          # 安装Playwright Chromium浏览器
+          python -m playwright install chromium
+          python -m playwright install-deps chromium
 
       - name: Run scraper
         env:
