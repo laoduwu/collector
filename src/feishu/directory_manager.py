@@ -154,21 +154,26 @@ class DirectoryManager:
 
         注意：
             - 可匹配目录列表不包含"待整理"文件夹
+            - "待整理"目录可以是非叶子节点（里面可能已有文档）
             - 如果"待整理"不存在，会返回None
         """
         logger.info("Getting matchable directories...")
 
-        # 获取所有叶子目录
-        leaf_dirs = self.get_leaf_directories()
+        # 获取所有目录
+        all_dirs = self.get_all_directories()
 
-        # 查找"待整理"文件夹
+        # 先从所有目录中查找"待整理"文件夹（不管是否为叶子节点）
         unorganized = None
-        matchable_dirs = []
-
-        for directory in leaf_dirs:
+        for directory in all_dirs:
             if directory.name == self.unorganized_folder_name:
                 unorganized = directory
-            else:
+                logger.info(f"Found unorganized folder: {directory.name} (leaf={directory.is_leaf})")
+                break
+
+        # 获取叶子目录作为可匹配目录（排除待整理文件夹）
+        matchable_dirs = []
+        for directory in all_dirs:
+            if directory.is_leaf and directory.name != self.unorganized_folder_name:
                 matchable_dirs.append(directory)
 
         logger.info(

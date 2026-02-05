@@ -1,6 +1,7 @@
 """基于Nodriver的网页抓取器"""
 import asyncio
 import re
+import aiohttp
 from typing import Optional, Dict, List
 from urllib.parse import urlparse
 import nodriver as uc
@@ -49,6 +50,52 @@ class NodriverScraper:
         """
         parsed = urlparse(url)
         return 'weixin.qq.com' in parsed.netloc or 'mp.weixin.qq.com' in parsed.netloc
+
+    async def _scrape_with_jina_reader(self, url: str) -> ArticleData:
+        """
+        使用 Jina Reader API 抓取文章（备用方案）
+
+        Jina Reader 可以绑过很多反爬机制
+        """
+        logger.info(f"Using Jina Reader API for: {url}")
+        jina_url = f"https://r.jina.ai/{url}"
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(jina_url, timeout=aiohttp.ClientTimeout(total=30)) as response:
+                if response.status != 200:
+                    raise Exception(f"Jina Reader failed with status {response.status}")
+
+                content = await response.text()
+
+        # Jina Reader 返回 Markdown 格式
+        # 解析标题（通常是第一行 # 开头）
+        lines = content.strip().split('\n')
+        title = "未知标题"
+        content_start = 0
+
+        for i, line in enumerate(lines):
+            if line.startswith('# '):
+                title = line[2:].strip()
+                content_start = i + 1
+                break
+            elif line.startswith('Title: '):
+                title = line[7:].strip()
+                content_start = i + 1
+                break
+
+        # 剩余内容作为正文
+        article_content = '\n'.join(lines[content_start:]).strip()
+
+        logger.info(f"Jina Reader extracted: title='{title}', content length={len(article_content)}")
+
+        return ArticleData(
+            url=url,
+            title=title,
+            content=article_content,
+            author=None,
+            publish_date=None,
+            images=[]
+        )
 
     @async_retry_with_backoff(max_retries=3, base_delay=5.0)
     async def scrape(self, url: str) -> ArticleData:
@@ -140,14 +187,32 @@ class NodriverScraper:
         except Exception as e:
             logger.warning(f"Failed to get page title: {e}")
 
-        # 检查是否是验证页面
+        # 检查是否是验证页面或非文章页面
+        is_blocked = False
         try:
-            page_html = await page.evaluate("document.body.innerHTML.substring(0, 500)")
-            logger.debug(f"Page HTML preview: {page_html}")
-            if "验证" in page_html or "请在微信客户端打开" in page_html:
-                logger.warning("Detected WeChat verification or client-only page")
+            page_html = await page.evaluate("document.body.innerHTML.substring(0, 1000)")
+            logger.debug(f"Page HTML preview: {page_html[:200]}")
+            # 检查各种被拦截的情况
+            blocked_indicators = [
+                "验证", "请在微信客户端打开", "环境异常", "访问过于频繁",
+                "Weixin Official Accounts Platform", "请使用微信扫一扫"
+            ]
+            for indicator in blocked_indicators:
+                if indicator in page_html or indicator in page_title:
+                    logger.warning(f"Detected blocked page: {indicator}")
+                    is_blocked = True
+                    break
         except Exception as e:
             logger.warning(f"Failed to check page content: {e}")
+
+        # 如果被拦截，使用 Jina Reader 作为备用方案
+        if is_blocked:
+            logger.info("Page blocked, switching to Jina Reader API...")
+            try:
+                return await self._scrape_with_jina_reader(url)
+            except Exception as e:
+                logger.error(f"Jina Reader also failed: {e}")
+                # 继续尝试原始方法
 
         # 额外等待确保 JavaScript 渲染完成
         await asyncio.sleep(2)
