@@ -62,8 +62,11 @@ jobs:
           IMAGE_BRANCH: ${{ secrets.IMAGE_BRANCH || 'main' }}
           # 日志配置
           LOG_LEVEL: ${{ secrets.LOG_LEVEL || 'INFO' }}
+          # Python路径配置
+          PYTHONPATH: ${{ github.workspace }}/src
         run: |
-          python -m src.main "$ARTICLE_URL"
+          cd src
+          python main.py "$ARTICLE_URL"
 
       - name: Upload logs on failure
         if: failure()
