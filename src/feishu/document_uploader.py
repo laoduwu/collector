@@ -12,6 +12,7 @@ from lark_oapi.api.docx.v1 import (
     Text,
     TextElement,
     TextRun,
+    TextStyle,
     Divider,
 )
 from .auth_manager import AuthManager
@@ -211,31 +212,48 @@ class DocumentUploader:
                 logger.warning("No content blocks to add")
                 return True
 
-            # 发送请求添加blocks
-            # 文档ID同时也是根block的ID
-            request = CreateDocumentBlockChildrenRequest.builder() \
-                .document_id(document_id) \
-                .block_id(document_id) \
-                .document_revision_id(-1) \
-                .request_body(
-                    CreateDocumentBlockChildrenRequestBody.builder()
-                    .children(blocks)
-                    .index(0)
+            logger.info(f"Prepared {len(blocks)} content blocks to add")
+
+            # 分批添加blocks，每批最多10个
+            batch_size = 10
+            total_added = 0
+            current_index = 0
+
+            for i in range(0, len(blocks), batch_size):
+                batch = blocks[i:i + batch_size]
+                logger.info(f"Adding batch {i // batch_size + 1}: {len(batch)} blocks")
+
+                request = CreateDocumentBlockChildrenRequest.builder() \
+                    .document_id(document_id) \
+                    .block_id(document_id) \
+                    .document_revision_id(-1) \
+                    .request_body(
+                        CreateDocumentBlockChildrenRequestBody.builder()
+                        .children(batch)
+                        .index(current_index)
+                        .build()
+                    ) \
                     .build()
-                ) \
-                .build()
 
-            response = self.client.docx.v1.document_block_children.create(request)
+                response = self.client.docx.v1.document_block_children.create(request)
 
-            if not response.success():
-                logger.error(
-                    f"Failed to add content: code={response.code}, "
-                    f"msg={response.msg}, log_id={response.get_log_id()}"
-                )
+                if not response.success():
+                    logger.error(
+                        f"Failed to add content batch: code={response.code}, "
+                        f"msg={response.msg}, log_id={response.get_log_id()}"
+                    )
+                    # 继续尝试添加后续批次
+                    continue
+
+                total_added += len(batch)
+                current_index += len(batch)
+
+            if total_added > 0:
+                logger.info(f"Successfully added {total_added}/{len(blocks)} content blocks")
+                return True
+            else:
+                logger.error("Failed to add any content blocks")
                 return False
-
-            logger.info(f"Successfully added {len(blocks)} content blocks")
-            return True
 
         except Exception as e:
             logger.error(f"Error adding content to document: {str(e)}")
@@ -243,6 +261,9 @@ class DocumentUploader:
 
     def _create_text_block(self, text: str, bold: bool = False) -> Block:
         """创建文本块"""
+        # 清理文本中的特殊字符
+        text = self._clean_text(text)
+
         text_element = TextElement.builder() \
             .text_run(
                 TextRun.builder()
@@ -252,6 +273,7 @@ class DocumentUploader:
             .build()
 
         text_obj = Text.builder() \
+            .style(TextStyle.builder().build()) \
             .elements([text_element]) \
             .build()
 
@@ -259,6 +281,18 @@ class DocumentUploader:
             .block_type(2) \
             .text(text_obj) \
             .build()
+
+    def _clean_text(self, text: str) -> str:
+        """清理文本中的特殊字符"""
+        if not text:
+            return ""
+        # 移除零宽字符和其他不可见字符
+        import re
+        # 移除零宽字符
+        text = re.sub(r'[\u200b\u200c\u200d\ufeff\u00ad]', '', text)
+        # 移除其他控制字符（保留换行和制表符）
+        text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+        return text.strip()
 
     def _create_heading_block(self, text: str, block_type: int = 4) -> Block:
         """
@@ -268,6 +302,9 @@ class DocumentUploader:
             text: 标题文本
             block_type: 3=heading1, 4=heading2, 5=heading3, ...
         """
+        # 清理文本
+        text = self._clean_text(text)
+
         text_element = TextElement.builder() \
             .text_run(
                 TextRun.builder()
@@ -277,6 +314,7 @@ class DocumentUploader:
             .build()
 
         text_obj = Text.builder() \
+            .style(TextStyle.builder().build()) \
             .elements([text_element]) \
             .build()
 
