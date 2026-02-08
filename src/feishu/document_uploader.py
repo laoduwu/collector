@@ -1,9 +1,17 @@
 """飞书文档上传器"""
-from typing import Optional
+from typing import Optional, List
 import lark_oapi as lark
 from lark_oapi.api.wiki.v2 import (
     CreateSpaceNodeRequest,
     Node
+)
+from lark_oapi.api.docx.v1 import (
+    CreateDocumentBlockChildrenRequest,
+    CreateDocumentBlockChildrenRequestBody,
+    Block,
+    Text,
+    TextElement,
+    TextRun,
 )
 from .auth_manager import AuthManager
 from matchers.types import Directory
@@ -135,8 +143,8 @@ class DocumentUploader:
                 logger.info(f"  - node_token: {node.node_token}")
                 logger.info(f"  - obj_token: {node.obj_token}")
 
-                # TODO: 后续可以使用 docx block API 添加内容
-                # 目前先创建空文档，内容通过标题体现
+                # 使用 docx block API 添加内容
+                self._add_content_to_document(node.obj_token, doc_content)
 
                 return doc_url
             else:
@@ -146,6 +154,141 @@ class DocumentUploader:
         except Exception as e:
             logger.error(f"Error creating document: {str(e)}")
             raise
+
+    def _add_content_to_document(self, document_id: str, content: str) -> bool:
+        """
+        向文档添加内容
+
+        Args:
+            document_id: 文档ID (obj_token)
+            content: 要添加的内容（纯文本，按段落分割）
+
+        Returns:
+            是否成功
+        """
+        logger.info(f"Adding content to document: {document_id}")
+
+        try:
+            # 将内容按段落分割
+            paragraphs = content.strip().split('\n')
+
+            # 构建block列表
+            blocks = []
+            for para in paragraphs:
+                para = para.strip()
+                if not para:
+                    continue
+
+                # 判断是否是标题
+                if para.startswith('# '):
+                    # 一级标题 - 跳过，因为文档已有标题
+                    continue
+                elif para.startswith('## '):
+                    # 二级标题
+                    block = self._create_heading_block(para[3:], block_type=4)  # heading2
+                elif para.startswith('### '):
+                    # 三级标题
+                    block = self._create_heading_block(para[4:], block_type=5)  # heading3
+                elif para.startswith('---'):
+                    # 分割线
+                    block = Block.builder().block_type(22).divider({}).build()  # divider
+                elif para.startswith('**') and para.endswith('**'):
+                    # 粗体行作为小标题
+                    block = self._create_text_block(para[2:-2], bold=True)
+                else:
+                    # 普通段落
+                    block = self._create_text_block(para)
+
+                blocks.append(block)
+
+            if not blocks:
+                logger.warning("No content blocks to add")
+                return True
+
+            # 发送请求添加blocks
+            # 文档ID同时也是根block的ID
+            request = CreateDocumentBlockChildrenRequest.builder() \
+                .document_id(document_id) \
+                .block_id(document_id) \
+                .document_revision_id(-1) \
+                .request_body(
+                    CreateDocumentBlockChildrenRequestBody.builder()
+                    .children(blocks)
+                    .index(0)
+                    .build()
+                ) \
+                .build()
+
+            response = self.client.docx.v1.document_block_children.create(request)
+
+            if not response.success():
+                logger.error(
+                    f"Failed to add content: code={response.code}, "
+                    f"msg={response.msg}, log_id={response.get_log_id()}"
+                )
+                return False
+
+            logger.info(f"Successfully added {len(blocks)} content blocks")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error adding content to document: {str(e)}")
+            return False
+
+    def _create_text_block(self, text: str, bold: bool = False) -> Block:
+        """创建文本块"""
+        text_element = TextElement.builder() \
+            .text_run(
+                TextRun.builder()
+                .content(text)
+                .build()
+            ) \
+            .build()
+
+        text_obj = Text.builder() \
+            .elements([text_element]) \
+            .build()
+
+        return Block.builder() \
+            .block_type(2) \
+            .text(text_obj) \
+            .build()
+
+    def _create_heading_block(self, text: str, block_type: int = 4) -> Block:
+        """
+        创建标题块
+
+        Args:
+            text: 标题文本
+            block_type: 3=heading1, 4=heading2, 5=heading3, ...
+        """
+        text_element = TextElement.builder() \
+            .text_run(
+                TextRun.builder()
+                .content(text)
+                .build()
+            ) \
+            .build()
+
+        text_obj = Text.builder() \
+            .elements([text_element]) \
+            .build()
+
+        # 根据block_type设置对应的heading属性
+        builder = Block.builder().block_type(block_type)
+
+        if block_type == 3:
+            builder.heading1(text_obj)
+        elif block_type == 4:
+            builder.heading2(text_obj)
+        elif block_type == 5:
+            builder.heading3(text_obj)
+        elif block_type == 6:
+            builder.heading4(text_obj)
+        else:
+            builder.text(text_obj)
+
+        return builder.build()
 
     def create_document_simple(
         self,
