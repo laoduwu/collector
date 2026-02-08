@@ -12,6 +12,7 @@ from lark_oapi.api.docx.v1 import (
     Text,
     TextElement,
     TextRun,
+    Divider,
 )
 from .auth_manager import AuthManager
 from matchers.types import Directory
@@ -179,6 +180,11 @@ class DocumentUploader:
                 if not para:
                     continue
 
+                # 限制单个段落长度（飞书API限制）
+                max_text_len = 10000
+                if len(para) > max_text_len:
+                    para = para[:max_text_len] + "..."
+
                 # 判断是否是标题
                 if para.startswith('# '):
                     # 一级标题 - 跳过，因为文档已有标题
@@ -191,10 +197,10 @@ class DocumentUploader:
                     block = self._create_heading_block(para[4:], block_type=5)  # heading3
                 elif para.startswith('---'):
                     # 分割线
-                    block = Block.builder().block_type(22).divider({}).build()  # divider
+                    block = Block.builder().block_type(22).divider(Divider.builder().build()).build()
                 elif para.startswith('**') and para.endswith('**'):
-                    # 粗体行作为小标题
-                    block = self._create_text_block(para[2:-2], bold=True)
+                    # 粗体行作为普通文本
+                    block = self._create_text_block(para[2:-2])
                 else:
                     # 普通段落
                     block = self._create_text_block(para)
