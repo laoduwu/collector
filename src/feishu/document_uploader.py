@@ -433,38 +433,47 @@ class DocumentUploader:
         return blocks
 
     def _batch_add_blocks(self, document_id: str, blocks: List[Block]) -> bool:
-        """分批添加块"""
+        """分批添加块，图片块单独发送"""
         batch_size = 10
         total_added = 0
         current_index = 0
 
-        for i in range(0, len(blocks), batch_size):
-            batch = blocks[i:i + batch_size]
-            logger.info(f"Adding batch {i // batch_size + 1}: {len(batch)} blocks")
+        # 将块按图片/非图片分组，保持顺序
+        groups = []  # [(is_image, [blocks])]
+        current_group: List[Block] = []
+        current_is_image = False
 
-            request = CreateDocumentBlockChildrenRequest.builder() \
-                .document_id(document_id) \
-                .block_id(document_id) \
-                .document_revision_id(-1) \
-                .request_body(
-                    CreateDocumentBlockChildrenRequestBody.builder()
-                    .children(batch)
-                    .index(current_index)
-                    .build()
-                ) \
-                .build()
+        for block in blocks:
+            is_image = (block.block_type == 27)
+            if is_image != current_is_image and current_group:
+                groups.append((current_is_image, current_group))
+                current_group = []
+            current_is_image = is_image
+            current_group.append(block)
+        if current_group:
+            groups.append((current_is_image, current_group))
 
-            response = self.client.docx.v1.document_block_children.create(request)
-
-            if not response.success():
-                logger.error(
-                    f"Failed to add content batch: code={response.code}, "
-                    f"msg={response.msg}, log_id={response.get_log_id()}"
-                )
-                continue
-
-            total_added += len(batch)
-            current_index += len(batch)
+        batch_num = 0
+        for is_image, group_blocks in groups:
+            if is_image:
+                # 图片块逐个发送
+                for img_block in group_blocks:
+                    batch_num += 1
+                    logger.info(f"Adding image block (batch {batch_num})")
+                    success = self._send_blocks(document_id, [img_block], current_index)
+                    if success:
+                        total_added += 1
+                        current_index += 1
+            else:
+                # 文本块按批次发送
+                for i in range(0, len(group_blocks), batch_size):
+                    batch = group_blocks[i:i + batch_size]
+                    batch_num += 1
+                    logger.info(f"Adding batch {batch_num}: {len(batch)} blocks")
+                    success = self._send_blocks(document_id, batch, current_index)
+                    if success:
+                        total_added += len(batch)
+                        current_index += len(batch)
 
         if total_added > 0:
             logger.info(f"Successfully added {total_added}/{len(blocks)} content blocks")
@@ -472,6 +481,30 @@ class DocumentUploader:
         else:
             logger.error("Failed to add any content blocks")
             return False
+
+    def _send_blocks(self, document_id: str, blocks: List[Block], index: int) -> bool:
+        """发送一批块到文档"""
+        request = CreateDocumentBlockChildrenRequest.builder() \
+            .document_id(document_id) \
+            .block_id(document_id) \
+            .document_revision_id(-1) \
+            .request_body(
+                CreateDocumentBlockChildrenRequestBody.builder()
+                .children(blocks)
+                .index(index)
+                .build()
+            ) \
+            .build()
+
+        response = self.client.docx.v1.document_block_children.create(request)
+
+        if not response.success():
+            logger.error(
+                f"Failed to add content: code={response.code}, "
+                f"msg={response.msg}, log_id={response.get_log_id()}"
+            )
+            return False
+        return True
 
     def _create_text_block(self, text: str, bold: bool = False) -> Block:
         """创建文本块"""
