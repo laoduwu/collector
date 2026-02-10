@@ -24,11 +24,13 @@ class ArticleData:
         content: str,
         author: Optional[str] = None,
         publish_date: Optional[str] = None,
-        images: Optional[List[str]] = None
+        images: Optional[List[str]] = None,
+        content_html: Optional[str] = None
     ):
         self.url = url
         self.title = title
-        self.content = content
+        self.content = content  # 纯文本内容
+        self.content_html = content_html  # HTML内容（保留格式）
         self.author = author
         self.publish_date = publish_date
         self.images = images or []
@@ -210,11 +212,14 @@ class PlaywrightScraper:
 
         # 提取正文
         content = ""
+        content_html = ""
         try:
             content_elem = await page.query_selector("#js_content")
             if content_elem:
                 content = await content_elem.inner_text()
                 content = content.strip()
+                content_html = await content_elem.inner_html()
+                content_html = content_html.strip()
                 logger.info(f"Found content, length: {len(content)}")
         except Exception as e:
             logger.warning(f"Content extraction failed: {e}")
@@ -225,6 +230,8 @@ class PlaywrightScraper:
                 if content_elem:
                     content = await content_elem.inner_text()
                     content = content.strip()
+                    content_html = await content_elem.inner_html()
+                    content_html = content_html.strip()
             except:
                 pass
 
@@ -238,6 +245,7 @@ class PlaywrightScraper:
             url=url,
             title=title,
             content=content,
+            content_html=content_html,
             author=author,
             publish_date=publish_date,
             images=images

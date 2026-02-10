@@ -28,6 +28,11 @@ class ArticleData:
         self.publish_date = publish_date
         self.images = images or []
 
+    @property
+    def content_length(self) -> int:
+        """返回内容长度"""
+        return len(self.content) if self.content else 0
+
     def __repr__(self):
         return f"ArticleData(title='{self.title}', images={len(self.images)})"
 
@@ -50,6 +55,48 @@ class NodriverScraper:
         """
         parsed = urlparse(url)
         return 'weixin.qq.com' in parsed.netloc or 'mp.weixin.qq.com' in parsed.netloc
+
+    def _create_fallback_article(self, url: str) -> ArticleData:
+        """
+        创建降级文章（当所有抓取方法都失败时）
+
+        Args:
+            url: 原文URL
+
+        Returns:
+            包含原文链接的降级文章
+        """
+        fallback_content = f"""## 无法自动抓取微信文章
+
+由于微信的反爬虫保护机制，本系统暂时无法自动抓取此文章内容。
+
+### 原文链接
+
+请点击查看原文：{url}
+
+### 解决方案
+
+1. **手动复制**：在微信中打开文章，复制内容到飞书
+2. **使用工具**：使用 [wechat-article-exporter](https://github.com/wechat-article/wechat-article-exporter) 导出
+
+### 技术说明
+
+微信公众号文章采用了多层防护机制：
+- 环境检测（检测自动化工具）
+- 验证码挑战
+- Referrer 检查
+- Cookie 验证
+
+这些机制使得自动化抓取变得极其困难。我们会持续关注新的技术方案。
+"""
+        return ArticleData(
+            url=url,
+            title="[微信文章] 无法自动抓取 - 请查看原文链接",
+            content=fallback_content,
+            author=None,
+            publish_date=None,
+            images=[]
+        )
 
     async def _scrape_with_jina_reader(self, url: str) -> ArticleData:
         """
@@ -209,19 +256,18 @@ class NodriverScraper:
         if is_blocked:
             logger.info("Page blocked, switching to Jina Reader API...")
             try:
-                return await self._scrape_with_jina_reader(url)
+                jina_result = await self._scrape_with_jina_reader(url)
+                # 验证Jina Reader是否真正成功（不是返回警告页面）
+                if jina_result.content_length > 500 and "Warning:" not in jina_result.content[:200]:
+                    return jina_result
+                else:
+                    logger.warning("Jina Reader returned blocked content")
+                    raise Exception("Jina Reader also blocked by WeChat")
             except Exception as e:
                 logger.warning(f"Jina Reader also failed: {e}")
                 # 返回带有原文链接的基本信息
                 logger.info("All scraping methods failed, returning link-only article")
-                return ArticleData(
-                    url=url,
-                    title="[微信文章] 请点击原文链接查看",
-                    content=f"由于微信反爬机制限制，无法自动抓取文章内容。\n\n请点击原文链接查看：\n{url}",
-                    author=None,
-                    publish_date=None,
-                    images=[]
-                )
+                return self._create_fallback_article(url)
 
         # 额外等待确保 JavaScript 渲染完成
         await asyncio.sleep(2)
