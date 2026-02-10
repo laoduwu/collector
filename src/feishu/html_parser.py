@@ -119,22 +119,12 @@ class HTMLToBlocksParser:
 
     def _handle_paragraph(self, element: Tag):
         """处理段落 - 支持行内混排样式"""
-        # 检查是否只包含图片
-        children = list(element.children)
         has_img = element.find('img')
 
         if has_img:
-            # 段落内混有图片和文本，逐个处理
+            # 段落内混有图片和文本，递归拆分处理
             inline_elements = []
-            for child in children:
-                if isinstance(child, Tag) and child.name == 'img':
-                    # 先输出已积累的行内文本
-                    if inline_elements:
-                        self._emit_rich_text_block(inline_elements)
-                        inline_elements = []
-                    self._handle_image(child)
-                else:
-                    self._collect_inline_elements(child, inline_elements, {})
+            self._walk_with_images(element, inline_elements, {})
             if inline_elements:
                 self._emit_rich_text_block(inline_elements)
             return
@@ -145,6 +135,46 @@ class HTMLToBlocksParser:
 
         if inline_elements:
             self._emit_rich_text_block(inline_elements)
+
+    def _walk_with_images(self, node, inline_elements: List[Dict], parent_style: Dict):
+        """递归遍历节点，遇到图片时切分文本块"""
+        if isinstance(node, NavigableString):
+            text = str(node)
+            if text.strip():
+                clean_text = re.sub(r'\s+', ' ', text)
+                if clean_text.strip():
+                    inline_elements.append({
+                        'text': clean_text,
+                        'bold': parent_style.get('bold', False),
+                        'italic': parent_style.get('italic', False),
+                    })
+            return
+
+        if not isinstance(node, Tag):
+            return
+
+        tag = node.name.lower() if node.name else ""
+
+        if tag == 'img':
+            # 先输出已积累的文本
+            if inline_elements:
+                self._emit_rich_text_block(inline_elements)
+                inline_elements.clear()
+            self._handle_image(node)
+            return
+
+        if tag == 'br':
+            return
+
+        # 计算样式
+        current_style = dict(parent_style)
+        if tag in ['strong', 'b']:
+            current_style['bold'] = True
+        elif tag in ['em', 'i']:
+            current_style['italic'] = True
+
+        for child in node.children:
+            self._walk_with_images(child, inline_elements, current_style)
 
     def _handle_section(self, element: Tag):
         """处理section（微信文章常用）"""
