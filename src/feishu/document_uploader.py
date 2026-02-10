@@ -1,7 +1,6 @@
 """飞书文档上传器"""
 import io
 import re
-import struct
 import requests
 from typing import Optional, List, Dict, Tuple
 import lark_oapi as lark
@@ -168,6 +167,9 @@ class DocumentUploader:
         if meta_blocks:
             blocks.append(self._create_divider_block())
 
+        # 收集图片信息：记录哪些位置是图片及其URL
+        image_positions: List[Tuple[int, str]] = []  # (block_index, image_url)
+
         # 解析HTML内容或使用纯文本
         if content_html:
             logger.info("Parsing HTML content for formatting")
@@ -176,13 +178,16 @@ class DocumentUploader:
             content_blocks = parser.parse(content_html)
             logger.info(f"Parsed {len(content_blocks)} content blocks from HTML")
 
-            # 转换为飞书块
             for cb in content_blocks:
-                feishu_block = self._content_block_to_feishu(cb, document_id)
-                if feishu_block:
-                    blocks.append(feishu_block)
+                if cb.block_type == "image" and cb.image_url:
+                    # 记录图片位置和URL，创建空占位块
+                    image_positions.append((len(blocks), cb.image_url))
+                    blocks.append(self._create_empty_image_block())
+                else:
+                    feishu_block = self._content_block_to_feishu(cb, document_id)
+                    if feishu_block:
+                        blocks.append(feishu_block)
         else:
-            # 降级：使用纯文本
             logger.info("No HTML content, using plain text")
             text_blocks = self._parse_plain_text(content)
             blocks.extend(text_blocks)
@@ -191,10 +196,18 @@ class DocumentUploader:
             logger.warning("No content blocks to add")
             return True
 
-        logger.info(f"Prepared {len(blocks)} content blocks to add")
+        logger.info(f"Prepared {len(blocks)} content blocks ({len(image_positions)} images)")
 
-        # 分批添加blocks
-        return self._batch_add_blocks(document_id, blocks)
+        # 步骤1: 创建所有块（包括空图片占位块）
+        created_block_ids = self._batch_add_blocks(document_id, blocks)
+
+        # 步骤2: 上传图片到对应的图片块
+        if image_positions and created_block_ids:
+            self._upload_images_to_blocks(
+                document_id, image_positions, created_block_ids
+            )
+
+        return bool(created_block_ids)
 
     def _create_meta_blocks(
         self,
@@ -217,7 +230,7 @@ class DocumentUploader:
         return blocks
 
     def _content_block_to_feishu(self, cb: ContentBlock, document_id: str = "") -> Optional[Block]:
-        """将ContentBlock转换为飞书Block"""
+        """将ContentBlock转换为飞书Block（图片块在外部单独处理）"""
         try:
             if cb.block_type == "text":
                 return self._create_rich_text_block(cb)
@@ -227,15 +240,6 @@ class DocumentUploader:
                 if block_type > 11:
                     block_type = 11
                 return self._create_heading_block(cb.content, block_type=block_type)
-
-            elif cb.block_type == "image":
-                if cb.image_url and document_id:
-                    image_block = self._create_image_block(cb.image_url, document_id)
-                    if image_block:
-                        return image_block
-                    # 上传失败时降级为链接
-                    return self._create_text_block(f"[图片] {cb.image_url}")
-                return None
 
             elif cb.block_type == "divider":
                 return self._create_divider_block()
@@ -260,114 +264,75 @@ class DocumentUploader:
                 return self._create_text_block(cb.content)
             return None
 
-    def _create_image_block(self, image_url: str, document_id: str) -> Optional[Block]:
-        """下载图片并上传到飞书，创建图片块"""
-        try:
-            # 下载图片
-            logger.info(f"Downloading image for Feishu upload: {image_url[:80]}...")
-            resp = requests.get(image_url, timeout=30)
-            resp.raise_for_status()
-            image_data = resp.content
-            file_size = len(image_data)
+    def _create_empty_image_block(self) -> Block:
+        """创建空图片占位块"""
+        return Block.builder() \
+            .block_type(27) \
+            .image(Image.builder().build()) \
+            .build()
 
-            # 从URL推断文件名
-            url_path = image_url.split('?')[0]
-            filename = url_path.split('/')[-1] or "image.jpg"
-            if '.' not in filename:
-                content_type = resp.headers.get('Content-Type', '')
-                if 'png' in content_type:
-                    filename += '.png'
-                elif 'gif' in content_type:
-                    filename += '.gif'
-                elif 'webp' in content_type:
-                    filename += '.webp'
+    def _upload_images_to_blocks(
+        self,
+        document_id: str,
+        image_positions: List[Tuple[int, str]],
+        created_block_ids: List[str]
+    ):
+        """上传图片到已创建的图片占位块"""
+        for block_index, image_url in image_positions:
+            if block_index >= len(created_block_ids):
+                logger.warning(f"Image block index {block_index} out of range")
+                continue
+
+            image_block_id = created_block_ids[block_index]
+            if not image_block_id:
+                logger.warning(f"No block_id for image at index {block_index}")
+                continue
+
+            try:
+                logger.info(f"Downloading image: {image_url[:80]}...")
+                resp = requests.get(image_url, timeout=30)
+                resp.raise_for_status()
+                image_data = resp.content
+                file_size = len(image_data)
+
+                # 推断文件名
+                url_path = image_url.split('?')[0]
+                filename = url_path.split('/')[-1] or "image.jpg"
+                if '.' not in filename:
+                    content_type = resp.headers.get('Content-Type', '')
+                    ext = '.jpg'
+                    if 'png' in content_type:
+                        ext = '.png'
+                    elif 'gif' in content_type:
+                        ext = '.gif'
+                    elif 'webp' in content_type:
+                        ext = '.webp'
+                    filename += ext
+
+                logger.info(f"Uploading to image block {image_block_id}: {filename} ({file_size} bytes)")
+                request = UploadAllMediaRequest.builder() \
+                    .request_body(
+                        UploadAllMediaRequestBody.builder()
+                        .file_name(filename)
+                        .parent_type("docx_image")
+                        .parent_node(image_block_id)
+                        .size(file_size)
+                        .file(io.BytesIO(image_data))
+                        .build()
+                    ) \
+                    .build()
+
+                response = self.client.drive.v1.media.upload_all(request)
+
+                if not response.success():
+                    logger.error(
+                        f"Failed to upload image: code={response.code}, msg={response.msg}"
+                    )
                 else:
-                    filename += '.jpg'
+                    logger.info(f"Image uploaded successfully, token: {response.data.file_token}")
 
-            # 获取图片尺寸
-            width, height = self._get_image_dimensions(image_data)
-
-            # 上传到飞书
-            logger.info(f"Uploading image to Feishu: {filename} ({file_size} bytes, {width}x{height})")
-            request = UploadAllMediaRequest.builder() \
-                .request_body(
-                    UploadAllMediaRequestBody.builder()
-                    .file_name(filename)
-                    .parent_type("docx_image")
-                    .parent_node(document_id)
-                    .size(file_size)
-                    .file(io.BytesIO(image_data))
-                    .build()
-                ) \
-                .build()
-
-            response = self.client.drive.v1.media.upload_all(request)
-
-            if not response.success():
-                logger.error(
-                    f"Failed to upload image to Feishu: code={response.code}, "
-                    f"msg={response.msg}"
-                )
-                return None
-
-            file_token = response.data.file_token
-            logger.info(f"Image uploaded to Feishu, token: {file_token}")
-
-            # 创建图片块（必须包含 width 和 height）
-            return Block.builder() \
-                .block_type(27) \
-                .image(
-                    Image.builder()
-                    .token(file_token)
-                    .width(width)
-                    .height(height)
-                    .build()
-                ) \
-                .build()
-
-        except Exception as e:
-            logger.warning(f"Failed to create image block: {e}")
-            return None
-
-    @staticmethod
-    def _get_image_dimensions(data: bytes) -> Tuple[int, int]:
-        """从图片二进制数据中解析宽高（支持 JPEG/PNG/GIF/WebP）"""
-        try:
-            # JPEG
-            if data[:2] == b'\xff\xd8':
-                i = 2
-                while i < len(data) - 1:
-                    if data[i] != 0xFF:
-                        break
-                    marker = data[i + 1]
-                    if marker in (0xC0, 0xC1, 0xC2):
-                        h, w = struct.unpack('>HH', data[i + 5:i + 9])
-                        return w, h
-                    length = struct.unpack('>H', data[i + 2:i + 4])[0]
-                    i += 2 + length
-            # PNG
-            elif data[:8] == b'\x89PNG\r\n\x1a\n':
-                w, h = struct.unpack('>II', data[16:24])
-                return w, h
-            # GIF
-            elif data[:6] in (b'GIF87a', b'GIF89a'):
-                w, h = struct.unpack('<HH', data[6:10])
-                return w, h
-            # WebP
-            elif data[:4] == b'RIFF' and data[8:12] == b'WEBP':
-                if data[12:16] == b'VP8 ':
-                    w = struct.unpack('<H', data[26:28])[0] & 0x3FFF
-                    h = struct.unpack('<H', data[28:30])[0] & 0x3FFF
-                    return w, h
-                elif data[12:16] == b'VP8L':
-                    bits = struct.unpack('<I', data[21:25])[0]
-                    w = (bits & 0x3FFF) + 1
-                    h = ((bits >> 14) & 0x3FFF) + 1
-                    return w, h
-        except Exception:
-            pass
-        # 默认尺寸
-        return 800, 600
+            except Exception as e:
+                logger.warning(f"Failed to upload image to block: {e}")
 
     def _create_rich_text_block(self, cb: ContentBlock) -> Block:
         """创建支持行内样式的富文本块"""
@@ -432,79 +397,55 @@ class DocumentUploader:
 
         return blocks
 
-    def _batch_add_blocks(self, document_id: str, blocks: List[Block]) -> bool:
-        """分批添加块，图片块单独发送"""
+    def _batch_add_blocks(self, document_id: str, blocks: List[Block]) -> List[str]:
+        """分批添加块，返回所有创建的 block_id 列表（按顺序对应输入 blocks）"""
         batch_size = 10
         total_added = 0
         current_index = 0
+        # 按顺序记录每个 block 的 id，失败的为空字符串
+        all_block_ids: List[str] = [""] * len(blocks)
 
-        # 将块按图片/非图片分组，保持顺序
-        groups = []  # [(is_image, [blocks])]
-        current_group: List[Block] = []
-        current_is_image = False
+        for i in range(0, len(blocks), batch_size):
+            batch = blocks[i:i + batch_size]
+            logger.info(f"Adding batch {i // batch_size + 1}: {len(batch)} blocks")
 
-        for block in blocks:
-            is_image = (block.block_type == 27)
-            if is_image != current_is_image and current_group:
-                groups.append((current_is_image, current_group))
-                current_group = []
-            current_is_image = is_image
-            current_group.append(block)
-        if current_group:
-            groups.append((current_is_image, current_group))
+            request = CreateDocumentBlockChildrenRequest.builder() \
+                .document_id(document_id) \
+                .block_id(document_id) \
+                .document_revision_id(-1) \
+                .request_body(
+                    CreateDocumentBlockChildrenRequestBody.builder()
+                    .children(batch)
+                    .index(current_index)
+                    .build()
+                ) \
+                .build()
 
-        batch_num = 0
-        for is_image, group_blocks in groups:
-            if is_image:
-                # 图片块逐个发送
-                for img_block in group_blocks:
-                    batch_num += 1
-                    logger.info(f"Adding image block (batch {batch_num})")
-                    success = self._send_blocks(document_id, [img_block], current_index)
-                    if success:
-                        total_added += 1
-                        current_index += 1
-            else:
-                # 文本块按批次发送
-                for i in range(0, len(group_blocks), batch_size):
-                    batch = group_blocks[i:i + batch_size]
-                    batch_num += 1
-                    logger.info(f"Adding batch {batch_num}: {len(batch)} blocks")
-                    success = self._send_blocks(document_id, batch, current_index)
-                    if success:
-                        total_added += len(batch)
-                        current_index += len(batch)
+            response = self.client.docx.v1.document_block_children.create(request)
+
+            if not response.success():
+                logger.error(
+                    f"Failed to add content batch: code={response.code}, "
+                    f"msg={response.msg}, log_id={response.get_log_id()}"
+                )
+                continue
+
+            # 记录创建的 block_id
+            if response.data and response.data.children:
+                for j, child in enumerate(response.data.children):
+                    idx = i + j
+                    if idx < len(all_block_ids) and child.block_id:
+                        all_block_ids[idx] = child.block_id
+
+            total_added += len(batch)
+            current_index += len(batch)
 
         if total_added > 0:
             logger.info(f"Successfully added {total_added}/{len(blocks)} content blocks")
-            return True
         else:
             logger.error("Failed to add any content blocks")
-            return False
 
-    def _send_blocks(self, document_id: str, blocks: List[Block], index: int) -> bool:
-        """发送一批块到文档"""
-        request = CreateDocumentBlockChildrenRequest.builder() \
-            .document_id(document_id) \
-            .block_id(document_id) \
-            .document_revision_id(-1) \
-            .request_body(
-                CreateDocumentBlockChildrenRequestBody.builder()
-                .children(blocks)
-                .index(index)
-                .build()
-            ) \
-            .build()
-
-        response = self.client.docx.v1.document_block_children.create(request)
-
-        if not response.success():
-            logger.error(
-                f"Failed to add content: code={response.code}, "
-                f"msg={response.msg}, log_id={response.get_log_id()}"
-            )
-            return False
-        return True
+        return all_block_ids
 
     def _create_text_block(self, text: str, bold: bool = False) -> Block:
         """创建文本块"""
