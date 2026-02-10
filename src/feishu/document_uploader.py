@@ -1,8 +1,9 @@
 """飞书文档上传器"""
 import io
 import re
+import struct
 import requests
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 import lark_oapi as lark
 from lark_oapi.api.wiki.v2 import (
     CreateSpaceNodeRequest,
@@ -283,8 +284,11 @@ class DocumentUploader:
                 else:
                     filename += '.jpg'
 
+            # 获取图片尺寸
+            width, height = self._get_image_dimensions(image_data)
+
             # 上传到飞书
-            logger.info(f"Uploading image to Feishu: {filename} ({file_size} bytes)")
+            logger.info(f"Uploading image to Feishu: {filename} ({file_size} bytes, {width}x{height})")
             request = UploadAllMediaRequest.builder() \
                 .request_body(
                     UploadAllMediaRequestBody.builder()
@@ -309,12 +313,14 @@ class DocumentUploader:
             file_token = response.data.file_token
             logger.info(f"Image uploaded to Feishu, token: {file_token}")
 
-            # 创建图片块
+            # 创建图片块（必须包含 width 和 height）
             return Block.builder() \
                 .block_type(27) \
                 .image(
                     Image.builder()
                     .token(file_token)
+                    .width(width)
+                    .height(height)
                     .build()
                 ) \
                 .build()
@@ -322,6 +328,46 @@ class DocumentUploader:
         except Exception as e:
             logger.warning(f"Failed to create image block: {e}")
             return None
+
+    @staticmethod
+    def _get_image_dimensions(data: bytes) -> Tuple[int, int]:
+        """从图片二进制数据中解析宽高（支持 JPEG/PNG/GIF/WebP）"""
+        try:
+            # JPEG
+            if data[:2] == b'\xff\xd8':
+                i = 2
+                while i < len(data) - 1:
+                    if data[i] != 0xFF:
+                        break
+                    marker = data[i + 1]
+                    if marker in (0xC0, 0xC1, 0xC2):
+                        h, w = struct.unpack('>HH', data[i + 5:i + 9])
+                        return w, h
+                    length = struct.unpack('>H', data[i + 2:i + 4])[0]
+                    i += 2 + length
+            # PNG
+            elif data[:8] == b'\x89PNG\r\n\x1a\n':
+                w, h = struct.unpack('>II', data[16:24])
+                return w, h
+            # GIF
+            elif data[:6] in (b'GIF87a', b'GIF89a'):
+                w, h = struct.unpack('<HH', data[6:10])
+                return w, h
+            # WebP
+            elif data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+                if data[12:16] == b'VP8 ':
+                    w = struct.unpack('<H', data[26:28])[0] & 0x3FFF
+                    h = struct.unpack('<H', data[28:30])[0] & 0x3FFF
+                    return w, h
+                elif data[12:16] == b'VP8L':
+                    bits = struct.unpack('<I', data[21:25])[0]
+                    w = (bits & 0x3FFF) + 1
+                    h = ((bits >> 14) & 0x3FFF) + 1
+                    return w, h
+        except Exception:
+            pass
+        # 默认尺寸
+        return 800, 600
 
     def _create_rich_text_block(self, cb: ContentBlock) -> Block:
         """创建支持行内样式的富文本块"""
