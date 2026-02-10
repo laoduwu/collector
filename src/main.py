@@ -124,13 +124,21 @@ class ArticleCollector:
 
             # Step 7: 创建飞书文档
             logger.info("Step 7/7: Creating Feishu document...")
+
+            # 构建原始图片URL和CDN URL列表
+            original_images = [orig for orig, _ in cdn_urls] if cdn_urls else []
+            cdn_url_list = [cdn for _, cdn in cdn_urls] if cdn_urls else []
+
             doc_url = self.document_uploader.create_document(
                 directory=target_directory.directory,
                 title=article.title,
                 content=final_content,
                 author=article.author,
                 publish_date=article.publish_date,
-                source_url=url
+                source_url=url,
+                content_html=article.content_html,
+                original_images=original_images,
+                cdn_urls=cdn_url_list
             )
 
             if doc_url:
