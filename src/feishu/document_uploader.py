@@ -12,6 +12,9 @@ from lark_oapi.api.wiki.v2 import (
 from lark_oapi.api.docx.v1 import (
     CreateDocumentBlockChildrenRequest,
     CreateDocumentBlockChildrenRequestBody,
+    PatchDocumentBlockRequest,
+    UpdateBlockRequest,
+    ReplaceImageRequest,
     Block,
     Text,
     TextElement,
@@ -354,7 +357,33 @@ class DocumentUploader:
                         f"Failed to upload image: code={response.code}, msg={response.msg}"
                     )
                 else:
-                    logger.info(f"Image uploaded successfully, token: {response.data.file_token}")
+                    file_token = response.data.file_token
+                    logger.info(f"Image uploaded successfully, token: {file_token}")
+
+                    # 关键步骤：patch 图片块，关联 file_token
+                    patch_request = PatchDocumentBlockRequest.builder() \
+                        .document_id(document_id) \
+                        .block_id(image_block_id) \
+                        .document_revision_id(-1) \
+                        .request_body(
+                            UpdateBlockRequest.builder()
+                            .replace_image(
+                                ReplaceImageRequest.builder()
+                                .token(file_token)
+                                .build()
+                            )
+                            .build()
+                        ) \
+                        .build()
+
+                    patch_response = self.client.docx.v1.document_block.patch(patch_request)
+                    if not patch_response.success():
+                        logger.error(
+                            f"Failed to patch image block: code={patch_response.code}, "
+                            f"msg={patch_response.msg}"
+                        )
+                    else:
+                        logger.info(f"Image block {image_block_id} patched with token {file_token}")
 
             except Exception as e:
                 logger.warning(f"Failed to upload image to block: {e}")
