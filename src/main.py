@@ -129,6 +129,9 @@ class ArticleCollector:
             original_images = [orig for orig, _ in cdn_urls] if cdn_urls else []
             cdn_url_list = [cdn for _, cdn in cdn_urls] if cdn_urls else []
 
+            # 构建原始图片URL到本地路径的映射
+            local_image_map = {orig: local for orig, local in downloaded_images} if downloaded_images else {}
+
             doc_url = self.document_uploader.create_document(
                 directory=target_directory.directory,
                 title=article.title,
@@ -138,7 +141,8 @@ class ArticleCollector:
                 source_url=url,
                 content_html=article.content_html,
                 original_images=original_images,
-                cdn_urls=cdn_url_list
+                cdn_urls=cdn_url_list,
+                local_image_map=local_image_map
             )
 
             if doc_url:

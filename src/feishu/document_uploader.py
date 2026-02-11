@@ -1,5 +1,6 @@
 """飞书文档上传器"""
 import io
+import os
 import re
 import requests
 from typing import Optional, List, Dict, Tuple
@@ -49,7 +50,8 @@ class DocumentUploader:
         source_url: Optional[str] = None,
         content_html: Optional[str] = None,
         original_images: Optional[List[str]] = None,
-        cdn_urls: Optional[List[str]] = None
+        cdn_urls: Optional[List[str]] = None,
+        local_image_map: Optional[Dict[str, str]] = None
     ) -> Optional[str]:
         """
         在指定目录创建文档（使用知识库 wiki API）
@@ -64,6 +66,7 @@ class DocumentUploader:
             content_html: HTML格式内容（保留格式）
             original_images: 原始图片URL列表
             cdn_urls: CDN图片URL列表
+            local_image_map: 原始图片URL到本地文件路径的映射
 
         Returns:
             文档URL，失败返回None
@@ -110,6 +113,13 @@ class DocumentUploader:
                     image_url_map = build_image_url_map(original_images, cdn_urls)
                     logger.info(f"Built image URL map with {len(image_url_map)} entries")
 
+                # 构建 CDN URL -> 本地路径 的映射
+                cdn_to_local: Dict[str, str] = {}
+                if local_image_map and image_url_map:
+                    for orig_url, local_path in local_image_map.items():
+                        cdn_url = image_url_map.get(orig_url, orig_url)
+                        cdn_to_local[cdn_url] = local_path
+
                 # 使用 docx block API 添加内容
                 self._add_structured_content(
                     document_id=node.obj_token,
@@ -119,7 +129,8 @@ class DocumentUploader:
                     author=author,
                     publish_date=publish_date,
                     source_url=source_url,
-                    image_url_map=image_url_map
+                    image_url_map=image_url_map,
+                    local_image_paths=cdn_to_local
                 )
 
                 return doc_url
@@ -140,7 +151,8 @@ class DocumentUploader:
         author: Optional[str],
         publish_date: Optional[str],
         source_url: Optional[str],
-        image_url_map: Dict[str, str]
+        image_url_map: Dict[str, str],
+        local_image_paths: Optional[Dict[str, str]] = None
     ) -> bool:
         """
         向文档添加结构化内容
@@ -154,6 +166,7 @@ class DocumentUploader:
             publish_date: 发布日期
             source_url: 原文链接
             image_url_map: 图片URL映射
+            local_image_paths: CDN URL到本地文件路径的映射
         """
         logger.info(f"Adding structured content to document: {document_id}")
 
@@ -204,7 +217,8 @@ class DocumentUploader:
         # 步骤2: 上传图片到对应的图片块
         if image_positions and created_block_ids:
             self._upload_images_to_blocks(
-                document_id, image_positions, created_block_ids
+                document_id, image_positions, created_block_ids,
+                local_image_paths=local_image_paths or {}
             )
 
         return bool(created_block_ids)
@@ -275,9 +289,12 @@ class DocumentUploader:
         self,
         document_id: str,
         image_positions: List[Tuple[int, str]],
-        created_block_ids: List[str]
+        created_block_ids: List[str],
+        local_image_paths: Optional[Dict[str, str]] = None
     ):
         """上传图片到已创建的图片占位块"""
+        local_image_paths = local_image_paths or {}
+
         for block_index, image_url in image_positions:
             if block_index >= len(created_block_ids):
                 logger.warning(f"Image block index {block_index} out of range")
@@ -289,26 +306,34 @@ class DocumentUploader:
                 continue
 
             try:
-                logger.info(f"Downloading image: {image_url[:80]}...")
-                resp = requests.get(image_url, timeout=30)
-                resp.raise_for_status()
-                image_data = resp.content
+                local_path = local_image_paths.get(image_url)
+
+                if local_path and os.path.exists(local_path):
+                    # 优先使用本地文件
+                    logger.info(f"Using local image: {local_path}")
+                    with open(local_path, 'rb') as f:
+                        image_data = f.read()
+                    filename = os.path.basename(local_path)
+                else:
+                    # 回退：从URL下载
+                    logger.info(f"Local image not found, downloading: {image_url[:80]}...")
+                    resp = requests.get(image_url, timeout=30)
+                    resp.raise_for_status()
+                    image_data = resp.content
+                    url_path = image_url.split('?')[0]
+                    filename = url_path.split('/')[-1] or "image.jpg"
+                    if '.' not in filename:
+                        content_type = resp.headers.get('Content-Type', '')
+                        ext = '.jpg'
+                        if 'png' in content_type:
+                            ext = '.png'
+                        elif 'gif' in content_type:
+                            ext = '.gif'
+                        elif 'webp' in content_type:
+                            ext = '.webp'
+                        filename += ext
+
                 file_size = len(image_data)
-
-                # 推断文件名
-                url_path = image_url.split('?')[0]
-                filename = url_path.split('/')[-1] or "image.jpg"
-                if '.' not in filename:
-                    content_type = resp.headers.get('Content-Type', '')
-                    ext = '.jpg'
-                    if 'png' in content_type:
-                        ext = '.png'
-                    elif 'gif' in content_type:
-                        ext = '.gif'
-                    elif 'webp' in content_type:
-                        ext = '.webp'
-                    filename += ext
-
                 logger.info(f"Uploading to image block {image_block_id}: {filename} ({file_size} bytes)")
                 request = UploadAllMediaRequest.builder() \
                     .request_body(
