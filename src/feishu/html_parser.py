@@ -263,8 +263,24 @@ class HTMLToBlocksParser:
             self.blocks.append(block)
 
     def _handle_code(self, element: Tag):
-        """处理代码块"""
-        text = element.get_text()
+        """处理代码块 - 支持微信 code-snippet 结构"""
+        # 微信代码块结构: <pre><code><span>line1</span></code><code><span><br></span></code>...
+        code_children = element.find_all('code', recursive=False)
+        if code_children and len(code_children) > 1:
+            lines = []
+            for code_tag in code_children:
+                # 检查是否是空行（只含 <br>）
+                if code_tag.find('br') and not code_tag.get_text().strip():
+                    lines.append('')
+                else:
+                    lines.append(code_tag.get_text())
+            text = '\n'.join(lines)
+        else:
+            # 非微信结构：处理 <br> 后获取文本
+            for br in element.find_all('br'):
+                br.replace_with('\n')
+            text = element.get_text()
+
         if text.strip():
             block = ContentBlock("code", text)
             self.blocks.append(block)
