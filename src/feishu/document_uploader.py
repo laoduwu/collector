@@ -2,6 +2,7 @@
 import io
 import os
 import re
+import struct
 import requests
 from typing import Optional, List, Dict, Tuple
 import lark_oapi as lark
@@ -360,18 +361,22 @@ class DocumentUploader:
                     file_token = response.data.file_token
                     logger.info(f"Image uploaded successfully, token: {file_token}")
 
-                    # 关键步骤：patch 图片块，关联 file_token
+                    # 读取图片实际尺寸
+                    img_w, img_h = self._get_image_dimensions(image_data)
+
+                    # 关键步骤：patch 图片块，关联 file_token 并设置宽高
+                    replace_builder = ReplaceImageRequest.builder().token(file_token)
+                    if img_w > 0 and img_h > 0:
+                        replace_builder.width(img_w).height(img_h)
+                        logger.info(f"Setting image dimensions: {img_w}x{img_h}")
+
                     patch_request = PatchDocumentBlockRequest.builder() \
                         .document_id(document_id) \
                         .block_id(image_block_id) \
                         .document_revision_id(-1) \
                         .request_body(
                             UpdateBlockRequest.builder()
-                            .replace_image(
-                                ReplaceImageRequest.builder()
-                                .token(file_token)
-                                .build()
-                            )
+                            .replace_image(replace_builder.build())
                             .build()
                         ) \
                         .build()
@@ -636,6 +641,55 @@ class DocumentUploader:
             .block_type(15) \
             .quote(text_obj) \
             .build()
+
+    @staticmethod
+    def _get_image_dimensions(data: bytes) -> Tuple[int, int]:
+        """从图片二进制数据读取宽高（不依赖PIL），返回 (width, height)"""
+        # PNG: 8-byte signature + IHDR chunk
+        if data[:8] == b'\x89PNG\r\n\x1a\n':
+            w, h = struct.unpack('>II', data[16:24])
+            return w, h
+
+        # JPEG: 搜索 SOF 标记
+        if data[:2] == b'\xff\xd8':
+            i = 2
+            while i < len(data) - 9:
+                if data[i] != 0xFF:
+                    break
+                marker = data[i + 1]
+                # SOF0, SOF1, SOF2, SOF3
+                if marker in (0xC0, 0xC1, 0xC2, 0xC3):
+                    h, w = struct.unpack('>HH', data[i + 5:i + 9])
+                    return w, h
+                # Skip marker segment
+                length = struct.unpack('>H', data[i + 2:i + 4])[0]
+                i += 2 + length
+            return 0, 0
+
+        # GIF
+        if data[:6] in (b'GIF87a', b'GIF89a'):
+            w, h = struct.unpack('<HH', data[6:10])
+            return w, h
+
+        # WebP
+        if data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+            chunk_type = data[12:16]
+            if chunk_type == b'VP8 ':
+                w = struct.unpack('<H', data[26:28])[0] & 0x3FFF
+                h = struct.unpack('<H', data[28:30])[0] & 0x3FFF
+                return w, h
+            elif chunk_type == b'VP8L':
+                bits = struct.unpack('<I', data[21:25])[0]
+                w = (bits & 0x3FFF) + 1
+                h = ((bits >> 14) & 0x3FFF) + 1
+                return w, h
+            elif chunk_type == b'VP8X':
+                # Extended WebP: canvas size at offset 24 (3 bytes each, LE)
+                w = int.from_bytes(data[24:27], 'little') + 1
+                h = int.from_bytes(data[27:30], 'little') + 1
+                return w, h
+
+        return 0, 0
 
     def _clean_text(self, text: str) -> str:
         """清理文本中的特殊字符"""
