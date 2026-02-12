@@ -47,10 +47,10 @@ jobs:
           FEISHU_ENCRYPT_KEY: ${{ secrets.FEISHU_ENCRYPT_KEY }}
           FEISHU_KNOWLEDGE_SPACE_ID: ${{ secrets.FEISHU_KNOWLEDGE_SPACE_ID }}
           FEISHU_UNORGANIZED_FOLDER_NAME: ${{ secrets.FEISHU_UNORGANIZED_FOLDER_NAME || '待整理' }}
-          # Jina AI配置
-          JINA_API_KEY: ${{ secrets.JINA_API_KEY }}
-          JINA_MODEL: ${{ secrets.JINA_MODEL || 'jina-embeddings-v2-base-zh' }}
-          SIMILARITY_THRESHOLD: ${{ secrets.SIMILARITY_THRESHOLD || '0.7' }}
+          # LLM配置（目录分类匹配）
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta/openai' }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL || 'gemini-2.5-flash' }}
           # GitHub配置（图片托管）
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           IMAGE_REPO: ${{ secrets.IMAGE_REPO }}
