@@ -270,7 +270,9 @@ class PlaywrightScraper:
         )
 
     async def _extract_weixin_images(self, page: Page) -> List[str]:
-        """提取微信文章中的图片URL"""
+        """提取微信文章中的图片URL，过滤装饰性小图"""
+        MIN_HEIGHT = 80  # CSS渲染高度低于此值视为装饰性图片（如分隔线）
+
         images = []
         try:
             img_elements = await page.query_selector_all("#js_content img")
@@ -283,6 +285,12 @@ class PlaywrightScraper:
                 if src and src.startswith("http"):
                     # 过滤微信图片域名
                     if 'mmbiz.qpic.cn' in src or 'mmbiz.qlogo.cn' in src:
+                        # 通过CSS渲染尺寸过滤装饰性小图（分隔线等）
+                        # 注：WeChat懒加载导致naturalWidth不可靠，用CSS渲染尺寸更准确
+                        rendered_h = await img.evaluate("el => el.height || 0")
+                        if 0 < rendered_h < MIN_HEIGHT:
+                            logger.debug(f"Skipping decorative image (rendered h={rendered_h}px): {src[:60]}...")
+                            continue
                         images.append(src)
 
             logger.info(f"Found {len(images)} WeChat images")

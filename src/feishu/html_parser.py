@@ -122,6 +122,9 @@ class HTMLToBlocksParser:
         """处理图片"""
         src = element.get('data-src') or element.get('src')
         if src and src.startswith('http'):
+            # 有URL映射时，跳过未映射的图片（已被过滤的装饰性小图等）
+            if self.image_url_map and src not in self.image_url_map:
+                return
             cdn_url = self.image_url_map.get(src, src)
             block = ContentBlock("image")
             block.image_url = cdn_url
