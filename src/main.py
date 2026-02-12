@@ -84,10 +84,23 @@ class ArticleCollector:
             # Step 2: 下载图片
             logger.info("Step 2/7: Downloading images...")
             downloaded_images = []
-            if article.images:
-                downloaded_images = self.image_downloader.download_images(article.images)
-                logger.info(f"✓ Downloaded {len(downloaded_images)}/{len(article.images)} images")
-            else:
+            # 飞书文档图片已由 scraper 预下载（需浏览器 cookies）
+            pre_downloaded = getattr(article, 'local_image_map', {})
+            if pre_downloaded:
+                downloaded_images = [(url, path) for url, path in pre_downloaded.items()]
+                logger.info(f"✓ {len(downloaded_images)} images pre-downloaded by scraper")
+
+            # 下载未预下载的图片
+            remaining_urls = [
+                url for url in article.images
+                if url not in pre_downloaded
+            ]
+            if remaining_urls:
+                extra = self.image_downloader.download_images(remaining_urls)
+                downloaded_images.extend(extra)
+                logger.info(f"✓ Downloaded {len(extra)}/{len(remaining_urls)} additional images")
+
+            if not downloaded_images and not article.images:
                 logger.info("✓ No images to download")
 
             # Step 3: 上传图片到GitHub
