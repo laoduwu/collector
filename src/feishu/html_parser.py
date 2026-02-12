@@ -102,6 +102,16 @@ class HTMLToBlocksParser:
     def _handle_heading(self, element: Tag, tag_name: str):
         """处理标题"""
         level = int(tag_name[1])
+
+        # 标题内可能嵌套图片（微信文章常见），先提取图片
+        has_img = element.find('img') or element.find('graphic')
+        if has_img:
+            inline_elements = []
+            self._walk_with_images(element, inline_elements, {})
+            if inline_elements:
+                self._emit_rich_text_block(inline_elements)
+            return
+
         text = element.get_text().strip()
         if text:
             block = ContentBlock("heading", text)
@@ -183,6 +193,16 @@ class HTMLToBlocksParser:
 
     def _handle_standalone_inline(self, element: Tag):
         """处理独立出现的行内元素（不在 p 标签内）"""
+        has_img = element.find('img') or element.find('graphic')
+
+        if has_img:
+            # 包含图片时，使用 _walk_with_images 正确拆分文本和图片
+            inline_elements = []
+            self._walk_with_images(element, inline_elements, {})
+            if inline_elements:
+                self._emit_rich_text_block(inline_elements)
+            return
+
         inline_elements = []
         self._collect_inline_elements(element, inline_elements, {})
         if inline_elements:
