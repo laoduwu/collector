@@ -10,6 +10,10 @@ on:
         required: true
         type: string
 
+concurrency:
+  group: scrape-article
+  cancel-in-progress: false
+
 jobs:
   scrape:
     runs-on: ubuntu-latest
