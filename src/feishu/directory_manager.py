@@ -36,9 +36,56 @@ class DirectoryManager:
 
         self.unorganized_folder_name = config.FEISHU_UNORGANIZED_FOLDER_NAME
 
+    def _list_nodes(self, parent_node_token: Optional[str] = None) -> List:
+        """
+        获取指定层级的节点列表
+
+        Args:
+            parent_node_token: 父节点token，None表示获取一级节点
+
+        Returns:
+            节点列表
+        """
+        nodes = []
+        page_token = None
+
+        while True:
+            builder = ListSpaceNodeRequest.builder() \
+                .space_id(self.space_id) \
+                .page_size(50)
+
+            if parent_node_token:
+                builder = builder.parent_node_token(parent_node_token)
+
+            request = builder.build()
+
+            if page_token:
+                request.page_token = page_token
+
+            response: ListSpaceNodeResponse = self.client.wiki.v2.space_node.list(request)
+
+            if not response.success():
+                logger.error(
+                    f"Failed to list space nodes: code={response.code}, "
+                    f"msg={response.msg}, log_id={response.get_log_id()}"
+                )
+                raise Exception(f"Failed to get knowledge space directories: {response.msg}")
+
+            if response.data.items:
+                nodes.extend(response.data.items)
+            else:
+                break
+
+            if response.data.has_more:
+                page_token = response.data.page_token
+            else:
+                break
+
+        return nodes
+
     def get_all_directories(self) -> List[Directory]:
         """
-        获取知识库的所有目录（递归遍历）
+        获取知识库的一级目录
 
         Returns:
             目录列表
@@ -50,56 +97,24 @@ class DirectoryManager:
 
         try:
             directories = []
-            page_token = None
+            nodes = self._list_nodes()
 
-            while True:
-                # 构建请求
-                request = ListSpaceNodeRequest.builder() \
-                    .space_id(self.space_id) \
-                    .page_size(50) \
-                    .build()
-
-                if page_token:
-                    request.page_token = page_token
-
-                # 发起请求
-                response: ListSpaceNodeResponse = self.client.wiki.v2.space_node.list(request)
-
-                if not response.success():
-                    logger.error(
-                        f"Failed to list space nodes: code={response.code}, "
-                        f"msg={response.msg}, log_id={response.get_log_id()}"
-                    )
-                    raise Exception(f"Failed to get knowledge space directories: {response.msg}")
-
-                # 解析节点
-                if response.data.items:
-                    logger.info(f"API returned {len(response.data.items)} items")
-                    for node in response.data.items:
-                        logger.debug(
-                            f"Node: title={node.title}, obj_type={node.obj_type}, "
-                            f"node_token={node.node_token}, has_child={node.has_child}"
-                        )
-                        # 收集所有节点（包括 doc, docx, wiki 等类型）
-                        directory = Directory(
-                            node_token=node.node_token,
-                            name=node.title,
-                            is_leaf=not node.has_child,  # 没有子节点即为叶子节点
-                            parent_token=node.parent_node_token
-                        )
-                        directories.append(directory)
-                        logger.info(
-                            f"Found directory: {directory.name} "
-                            f"(type={node.obj_type}, leaf={directory.is_leaf})"
-                        )
-                else:
-                    logger.warning("API returned no items (response.data.items is empty or None)")
-
-                # 检查是否有下一页
-                if response.data.has_more:
-                    page_token = response.data.page_token
-                else:
-                    break
+            for node in nodes:
+                logger.debug(
+                    f"Node: title={node.title}, obj_type={node.obj_type}, "
+                    f"node_token={node.node_token}, has_child={node.has_child}"
+                )
+                directory = Directory(
+                    node_token=node.node_token,
+                    name=node.title,
+                    is_leaf=not node.has_child,
+                    parent_token=node.parent_node_token
+                )
+                directories.append(directory)
+                logger.info(
+                    f"Found directory: {directory.name} "
+                    f"(type={node.obj_type}, leaf={directory.is_leaf})"
+                )
 
             logger.info(f"Found {len(directories)} directories")
             return directories
@@ -147,37 +162,49 @@ class DirectoryManager:
 
     def get_matchable_directories(self) -> tuple[List[Directory], Optional[Directory]]:
         """
-        获取可用于匹配的目录和兜底目录
+        获取可用于匹配的二级目录和兜底目录
 
         Returns:
-            (可匹配的叶子目录列表, "待整理"目录)
+            (可匹配的二级目录列表, "待整理"目录)
 
         注意：
-            - 可匹配目录列表不包含"待整理"文件夹
-            - "待整理"目录可以是非叶子节点（里面可能已有文档）
-            - 如果"待整理"不存在，会返回None
+            - 文档创建在二级目录下
+            - "待整理"是一级目录，直接作为兜底
+            - 其它一级目录的子节点（二级目录）参与匹配
         """
         logger.info("Getting matchable directories...")
 
-        # 获取所有目录
-        all_dirs = self.get_all_directories()
+        # 获取一级目录
+        top_dirs = self.get_all_directories()
 
-        # 先从所有目录中查找"待整理"文件夹（不管是否为叶子节点）
+        # 查找"待整理"文件夹
         unorganized = None
-        for directory in all_dirs:
+        parent_dirs = []
+        for directory in top_dirs:
             if directory.name == self.unorganized_folder_name:
                 unorganized = directory
-                logger.info(f"Found unorganized folder: {directory.name} (leaf={directory.is_leaf})")
-                break
+                logger.info(f"Found unorganized folder: {directory.name}")
+            else:
+                parent_dirs.append(directory)
 
-        # 获取叶子目录作为可匹配目录（排除待整理文件夹）
+        # 获取所有一级目录的子节点（二级目录）用于匹配
         matchable_dirs = []
-        for directory in all_dirs:
-            if directory.is_leaf and directory.name != self.unorganized_folder_name:
-                matchable_dirs.append(directory)
+        for parent in parent_dirs:
+            child_nodes = self._list_nodes(parent_node_token=parent.node_token)
+            for node in child_nodes:
+                child_dir = Directory(
+                    node_token=node.node_token,
+                    name=node.title,
+                    is_leaf=not node.has_child,
+                    parent_token=node.parent_node_token
+                )
+                matchable_dirs.append(child_dir)
+                logger.info(
+                    f"Found sub-directory: {parent.name} > {child_dir.name}"
+                )
 
         logger.info(
-            f"Got {len(matchable_dirs)} matchable directories, "
+            f"Got {len(matchable_dirs)} matchable sub-directories, "
             f"unorganized folder: {unorganized.name if unorganized else 'None'}"
         )
 

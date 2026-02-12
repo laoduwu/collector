@@ -22,8 +22,7 @@ except ImportError:
 from scrapers.image_downloader import ImageDownloader
 from image_pipeline.github_uploader import GitHubUploader
 from image_pipeline.jsdelivr_cdn import JsDelivrCDN
-from matchers.jina_client import JinaClient, JinaAPIQuotaError
-from matchers.similarity_matcher import SimilarityMatcher
+from matchers.directory_matcher import DirectoryMatcher
 from matchers.types import MatchResult
 from feishu.auth_manager import AuthManager
 from feishu.directory_manager import DirectoryManager
@@ -51,7 +50,7 @@ class ArticleCollector:
         self.image_downloader = ImageDownloader()
         self.github_uploader = GitHubUploader()
         self.cdn_generator = JsDelivrCDN()
-        self.similarity_matcher = SimilarityMatcher()
+        self.directory_matcher = DirectoryMatcher()
 
         # 飞书组件
         self.auth_manager = AuthManager()
@@ -190,67 +189,31 @@ class ArticleCollector:
         Returns:
             匹配结果（保证有返回值）
         """
-        # 初始化unorganized变量，避免异常情况下未定义
-        unorganized = None
+        # 获取可匹配的目录和兜底目录
+        matchable_dirs, unorganized = self.directory_manager.get_matchable_directories()
 
-        try:
-            # 获取可匹配的目录和兜底目录
-            matchable_dirs, unorganized = self.directory_manager.get_matchable_directories()
-
-            # 确保有兜底目录
-            if not unorganized:
-                logger.error("Unorganized folder not found! Cannot proceed.")
-                raise ValueError(
-                    f"'{config.FEISHU_UNORGANIZED_FOLDER_NAME}' folder not found in knowledge space"
-                )
-
-            # 如果没有可匹配的目录，直接使用兜底目录
-            if not matchable_dirs:
-                logger.warning("No matchable directories found, using unorganized folder")
-                return MatchResult(
-                    directory=unorganized,
-                    similarity=0.0,
-                    confidence='low'
-                )
-
-            # 为目录计算embeddings
-            logger.info("Computing embeddings for directories...")
-            matchable_dirs = self.similarity_matcher.compute_embeddings_for_directories(
-                matchable_dirs
+        # 确保有兜底目录
+        if not unorganized:
+            logger.error("Unorganized folder not found! Cannot proceed.")
+            raise ValueError(
+                f"'{config.FEISHU_UNORGANIZED_FOLDER_NAME}' folder not found in knowledge space"
             )
 
-            # 执行匹配（带兜底）
-            match_result = self.similarity_matcher.match_directory_with_fallback(
-                article_title=article_title,
-                directories=matchable_dirs,
-                fallback_directory=unorganized
+        # 如果没有可匹配的目录，直接使用兜底目录
+        if not matchable_dirs:
+            logger.warning("No matchable directories found, using unorganized folder")
+            return MatchResult(
+                directory=unorganized,
+                similarity=0.0,
+                confidence='low'
             )
 
-            return match_result
-
-        except JinaAPIQuotaError:
-            # API额度用尽，使用兜底目录
-            logger.error("Jina API quota exceeded, using unorganized folder")
-            if unorganized:
-                return MatchResult(
-                    directory=unorganized,
-                    similarity=0.0,
-                    confidence='low'
-                )
-            else:
-                raise
-
-        except Exception as e:
-            logger.error(f"Error in directory matching: {str(e)}")
-            # 任何错误都使用兜底目录
-            if unorganized:
-                return MatchResult(
-                    directory=unorganized,
-                    similarity=0.0,
-                    confidence='low'
-                )
-            else:
-                raise
+        # 使用 LLM 分类匹配（带兜底）
+        return self.directory_matcher.match_directory_with_fallback(
+            article_title=article_title,
+            directories=matchable_dirs,
+            fallback_directory=unorganized
+        )
 
 
 async def main():

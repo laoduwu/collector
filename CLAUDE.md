@@ -10,6 +10,27 @@ URL → Cloudflare Workers → GitHub Actions → Python脚本 → 飞书知识�
 
 核心流程: 抓取文章 → 下载图片 → 上传GitHub CDN → AI匹配目录 → 写入飞书
 
+## 知识库目录结构与匹配规则
+
+```
+知识库
+├── 一级目录A
+│   ├── 二级目录A1  ← 文档创建在这里
+│   └── 二级目录A2  ← 文档创建在这里
+├── 一级目录B
+│   ├── 二级目录B1
+│   └── 二级目录B2
+└── 待整理          ← 兜底目录（一级）
+```
+
+- 匹配范围: 所有一级目录下的**二级目录**参与匹配
+- 文档归属: 新建文档放到匹配的二级目录下
+- 兜底逻辑: "待整理"是一级目录，LLM 无法匹配或异常时归入此目录
+- 匹配方式: LLM 分类（非 Embedding 相似度），将文章标题+目录列表发给 LLM 判断归属
+  - 使用 LLM 的世界知识理解文章主题（如"Trae"→AI编程工具）
+  - 目录增删无需维护额外描述，自动适应
+  - LLM 返回最匹配的目录名，无匹配则归入"待整理"
+
 ## 项目结构
 
 ```
@@ -18,7 +39,7 @@ src/
 ├── scrapers/                  # 网页抓取 (Playwright/Nodriver)
 ├── feishu/                    # 飞书API (认证/目录/文档上传/HTML解析)
 ├── image_pipeline/            # 图片处理 (GitHub上传/jsDelivr CDN)
-├── matchers/                  # AI语义目录匹配 (Jina Embeddings)
+├── matchers/                  # AI目录匹配 (LLM分类)
 └── utils/                     # 配置/日志/重试
 ```
 
@@ -36,7 +57,9 @@ pytest tests/                        # 运行测试
 配置在 `.env` 文件中:
 - `FEISHU_APP_ID/APP_SECRET` - 飞书应用凭证
 - `FEISHU_KNOWLEDGE_SPACE_ID` - 知识库空间ID
-- `JINA_API_KEY` - Jina AI嵌入API
+- `LLM_API_KEY` - Google Gemini API密钥（目录分类匹配，免费，无需绑卡）
+- `LLM_BASE_URL` - LLM API地址（默认Gemini OpenAI兼容接口）
+- `LLM_MODEL` - LLM模型（默认gemini-2.5-flash）
 - `GH_TOKEN/IMAGE_REPO` - GitHub图片托管
 
 ## 沟通语言
@@ -45,5 +68,5 @@ pytest tests/                        # 运行测试
 
 ## 技术栈
 
-- Python 3.11+, Playwright/Nodriver, Jina AI Embeddings, 飞书 lark-oapi
+- Python 3.11+, Playwright/Nodriver, Google Gemini API (免费), 飞书 lark-oapi
 - 部署: GitHub Actions + Cloudflare Workers

@@ -18,10 +18,10 @@ class Config:
     FEISHU_KNOWLEDGE_SPACE_ID: str = os.getenv('FEISHU_KNOWLEDGE_SPACE_ID', '')
     FEISHU_UNORGANIZED_FOLDER_NAME: str = os.getenv('FEISHU_UNORGANIZED_FOLDER_NAME', '待整理')
 
-    # Jina AI配置
-    JINA_API_KEY: str = os.getenv('JINA_API_KEY', '')
-    JINA_MODEL: str = os.getenv('JINA_MODEL', 'jina-embeddings-v2-base-zh')
-    SIMILARITY_THRESHOLD: float = float(os.getenv('SIMILARITY_THRESHOLD', '0.7'))
+    # LLM配置（目录分类匹配）
+    LLM_API_KEY: str = os.getenv('LLM_API_KEY', '')
+    LLM_BASE_URL: str = os.getenv('LLM_BASE_URL', 'https://generativelanguage.googleapis.com/v1beta/openai')
+    LLM_MODEL: str = os.getenv('LLM_MODEL', 'gemini-2.5-flash')
 
     # GitHub配置（图片托管）
     GH_TOKEN: str = os.getenv('GH_TOKEN', '')
@@ -50,7 +50,7 @@ class Config:
             'FEISHU_APP_ID',
             'FEISHU_APP_SECRET',
             'FEISHU_KNOWLEDGE_SPACE_ID',
-            'JINA_API_KEY',
+            'LLM_API_KEY',
             'GH_TOKEN',
             'IMAGE_REPO',
         ]
