@@ -64,7 +64,7 @@ class HTMLToBlocksParser:
 
         if tag_name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
             self._handle_heading(element, tag_name)
-        elif tag_name == 'img':
+        elif tag_name in ['img', 'graphic']:
             self._handle_image(element)
         elif tag_name == 'p':
             self._handle_paragraph(element)
@@ -119,7 +119,7 @@ class HTMLToBlocksParser:
 
     def _handle_paragraph(self, element: Tag):
         """处理段落 - 支持行内混排样式"""
-        has_img = element.find('img')
+        has_img = element.find('img') or element.find('graphic')
 
         if has_img:
             # 段落内混有图片和文本，递归拆分处理
@@ -155,7 +155,7 @@ class HTMLToBlocksParser:
 
         tag = node.name.lower() if node.name else ""
 
-        if tag == 'img':
+        if tag in ['img', 'graphic']:
             # 先输出已积累的文本
             if inline_elements:
                 self._emit_rich_text_block(inline_elements)
@@ -209,7 +209,7 @@ class HTMLToBlocksParser:
         tag = node.name.lower() if node.name else ""
 
         # 图片在行内收集中跳过（由上层处理）
-        if tag == 'img':
+        if tag in ['img', 'graphic']:
             return
         if tag == 'br':
             return

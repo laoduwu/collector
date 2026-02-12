@@ -274,32 +274,69 @@ class PlaywrightScraper:
         return images
 
     async def _scrape_generic(self, page: Page, url: str) -> ArticleData:
-        """抓取普通网页文章"""
-        logger.info("Scraping generic web article with Playwright...")
+        """抓取普通网页文章 - 使用 Trafilatura 提取正文"""
+        import trafilatura
 
-        # 提取标题
-        title = await self._extract_title(page)
+        logger.info("Scraping generic web article with Playwright + Trafilatura...")
 
-        # 提取作者
-        author = await self._extract_author(page)
+        # Playwright 渲染后获取完整 HTML
+        full_html = await page.content()
 
-        # 提取发布日期
-        publish_date = await self._extract_publish_date(page)
+        # Trafilatura 提取正文 HTML（保留格式标签）
+        content_html = trafilatura.extract(
+            full_html,
+            output_format='html',
+            include_images=True,
+            include_links=True,
+            include_formatting=True,
+            url=url,
+        )
 
-        # 提取正文
-        content = await self._extract_content(page)
+        # 提取纯文本作为 fallback
+        content_text = trafilatura.extract(full_html, url=url) or ""
 
-        # 提取图片
-        images = await self._extract_images(page)
+        # 提取元数据（标题、作者、日期）
+        metadata = trafilatura.extract_metadata(full_html, default_url=url)
+
+        title = (
+            (metadata.title if metadata and metadata.title else None)
+            or await self._extract_title(page)
+        )
+        author = (
+            (metadata.author if metadata and metadata.author else None)
+            or await self._extract_author(page)
+        )
+        publish_date = (
+            (metadata.date if metadata and metadata.date else None)
+            or await self._extract_publish_date(page)
+        )
+
+        # 从正文 HTML 中提取图片 URL
+        images = self._extract_images_from_html(content_html) if content_html else []
 
         return ArticleData(
             url=url,
             title=title,
-            content=content,
+            content=content_text or "内容提取失败",
             author=author,
             publish_date=publish_date,
-            images=images
+            images=images,
+            content_html=content_html,
         )
+
+    def _extract_images_from_html(self, html: str) -> List[str]:
+        """从 HTML 内容中提取图片 URL（支持 img 和 trafilatura 的 graphic 标签）"""
+        from bs4 import BeautifulSoup
+
+        images = []
+        soup = BeautifulSoup(html, 'lxml')
+        for img in soup.find_all(['img', 'graphic']):
+            src = img.get('src') or img.get('data-src')
+            if src and src.startswith('http'):
+                url_lower = src.lower()
+                if not any(kw in url_lower for kw in ['icon', 'logo', 'avatar', 'emoji']):
+                    images.append(src)
+        return images
 
     async def _extract_title(self, page: Page) -> str:
         """提取标题"""

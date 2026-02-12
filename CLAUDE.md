@@ -39,6 +39,10 @@ pytest tests/                        # 运行测试
 - `JINA_API_KEY` - Jina AI嵌入API
 - `GH_TOKEN/IMAGE_REPO` - GitHub图片托管
 
+## 沟通语言
+
+- 回复统一使用中文
+
 ## 技术栈
 
 - Python 3.11+, Playwright/Nodriver, Jina AI Embeddings, 飞书 lark-oapi
