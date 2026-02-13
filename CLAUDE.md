@@ -8,7 +8,9 @@
 URL → Cloudflare Workers → GitHub Actions → Python脚本 → 飞书知识库
 ```
 
-核心流程: 抓取文章 → 下载图片 → 上传GitHub CDN → AI匹配目录 → 写入飞书
+核心流程:
+- 文章: 抓取文章 → 下载图片 → 上传GitHub CDN → AI匹配目录 → 写入飞书
+- 媒体: yt-dlp提取音频 → faster-whisper转录 → Gemini排版 → AI匹配目录 → 写入飞书
 
 ## 输入处理
 
@@ -38,15 +40,24 @@ Webhook接收器需要从消息中**提取第一个有效URL**，忽略其余文
   - 目录增删无需维护额外描述，自动适应
   - LLM 返回最匹配的目录名，无匹配则归入"待整理"
 
+## 媒体转录
+
+支持视频/音频/播客链接自动转录为格式化文本写入飞书文档。
+
+- 支持平台: YouTube, Bilibili, Apple Podcasts, SoundCloud, Spotify 等 (yt-dlp 1700+ 平台)
+- 处理流程: yt-dlp 提取音频 → faster-whisper 本地转录 → Gemini 语义排版 → Markdown → HTML → 飞书文档
+- 全部免费，无需额外 API Key（faster-whisper 本地运行，Gemini 免费额度）
+- 媒体文档无图片流程（跳过图片下载/上传/CDN 步骤）
+
 ## 项目结构
 
 ```
 src/
 ├── main.py                    # 入口
-├── scrapers/                  # 网页抓取 (Playwright/Nodriver)
+├── scrapers/                  # 网页抓取 (Playwright/Nodriver) + 媒体转录 (yt-dlp/faster-whisper)
 ├── feishu/                    # 飞书API (认证/目录/文档上传/HTML解析)
 ├── image_pipeline/            # 图片处理 (GitHub上传/jsDelivr CDN)
-├── matchers/                  # AI目录匹配 (LLM分类)
+├── matchers/                  # AI目录匹配 (LLM分类) + 转录排版
 └── utils/                     # 配置/日志/重试
 ```
 

@@ -110,6 +110,81 @@ class LLMClient:
             logger.error(f"Failed to classify article: {str(e)}")
             raise
 
+    @retry_with_backoff(
+        max_retries=3,
+        base_delay=30.0,
+        exceptions=(requests.RequestException,)
+    )
+    def format_transcript(self, raw_text: str, title: str) -> str:
+        """
+        调用 LLM 对转录文本做语义排版
+
+        Args:
+            raw_text: 原始转录文本
+            title: 媒体标题
+
+        Returns:
+            Markdown 格式的排版文本
+        """
+        # 截断过长文本，避免超出上下文限制
+        max_chars = 50000
+        truncated = raw_text[:max_chars] if len(raw_text) > max_chars else raw_text
+
+        prompt = f"""你是一个专业的文本编辑。请对以下语音转录文本进行语义排版。
+
+标题：{title}
+
+转录原文：
+{truncated}
+
+排版要求：
+1. 将文本组织成有逻辑的段落
+2. 添加合适的小标题（用 ## 标记）
+3. 修正明显的语音识别错误（错别字、断句不当等）
+4. 保留原文的所有信息，不要删减内容
+5. 输出纯 Markdown 格式，不要用代码块包裹
+6. 第一行用 # 标记标题"""
+
+        try:
+            headers = {
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {self.api_key}'
+            }
+
+            payload = {
+                'model': self.model,
+                'messages': [
+                    {'role': 'user', 'content': prompt}
+                ],
+                'temperature': 0.3
+            }
+
+            logger.info(f"Formatting transcript: {title} ({len(raw_text)} chars)")
+
+            response = requests.post(
+                f"{self.base_url}/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=120  # 排版可能较慢
+            )
+
+            if response.status_code == 429:
+                raise requests.RequestException("LLM API rate limited")
+
+            response.raise_for_status()
+
+            data = response.json()
+            content = data['choices'][0]['message']['content'].strip()
+
+            logger.info(f"Transcript formatted: {len(content)} chars")
+            return content
+
+        except requests.RequestException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to format transcript: {str(e)}")
+            raise
+
     def _parse_response(
         self,
         content: str,

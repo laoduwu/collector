@@ -17,7 +17,7 @@ concurrency:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Checkout code
@@ -33,6 +33,11 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: Install system dependencies
+        run: |
+          # ffmpeg for yt-dlp audio conversion
+          sudo apt-get update && sudo apt-get install -y ffmpeg
 
       - name: Install Playwright browsers
         run: |
