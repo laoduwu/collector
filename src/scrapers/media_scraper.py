@@ -32,6 +32,9 @@ SHORT_LINK_DOMAINS = {'b23.tv'}
 # 需要通过 Playwright 获取 cookies 的域名（反爬严格）
 COOKIE_REQUIRED_DOMAINS = {'bilibili.com', 'www.bilibili.com'}
 
+# Playwright 浏览器 UA（必须与 yt-dlp 使用的一致，否则 cookie 失效）
+BROWSER_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+
 
 @dataclass
 class MediaMetadata:
@@ -111,7 +114,7 @@ async def _fetch_cookies_with_playwright(url: str) -> Optional[str]:
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             context = await browser.new_context(
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+                user_agent=BROWSER_USER_AGENT
             )
             page = await context.new_page()
 
@@ -224,7 +227,11 @@ async def extract_audio(url: str) -> MediaMetadata:
         logger.info("Site requires cookies, fetching via Playwright...")
         cookies_path = await _fetch_cookies_with_playwright(url)
         if cookies_path:
-            cookies_args = ['--cookies', cookies_path]
+            # cookies 和 UA 必须匹配，否则服务端会拒绝
+            cookies_args = [
+                '--cookies', cookies_path,
+                '--user-agent', BROWSER_USER_AGENT,
+            ]
         else:
             logger.warning("Failed to obtain cookies, trying without...")
 
