@@ -222,74 +222,54 @@ async def extract_audio(url: str) -> MediaMetadata:
     output_template = os.path.join(download_dir, '%(id)s.%(ext)s')
 
     # 如果需要 cookies，先用 Playwright 获取
-    cookies_args = []
+    cookies_path = None
     if _needs_cookies(url):
         logger.info("Site requires cookies, fetching via Playwright...")
         cookies_path = await _fetch_cookies_with_playwright(url)
-        if cookies_path:
-            # cookies 和 UA 必须匹配，否则服务端会拒绝
-            cookies_args = [
-                '--cookies', cookies_path,
-                '--user-agent', BROWSER_USER_AGENT,
-            ]
-        else:
+        if not cookies_path:
             logger.warning("Failed to obtain cookies, trying without...")
 
-    # 先提取元数据
-    logger.info(f"Extracting media metadata: {url}")
+    # 用 yt-dlp Python API 下载（可精确控制 headers/cookies）
+    logger.info(f"Downloading audio with yt-dlp: {url}")
     try:
-        meta_cmd = [
-            'yt-dlp',
-            '--no-download',
-            '--print', '%(title)s\n%(uploader)s\n%(duration)s',
-            '--no-warnings',
-            '--no-check-certificates',
-            *cookies_args,
-            url
-        ]
-        meta_result = subprocess.run(
-            meta_cmd, capture_output=True, text=True, timeout=30
-        )
-        meta_lines = meta_result.stdout.strip().split('\n')
-        title = meta_lines[0] if len(meta_lines) > 0 and meta_lines[0] != 'NA' else 'Untitled'
-        author = meta_lines[1] if len(meta_lines) > 1 and meta_lines[1] != 'NA' else None
-        duration_str = meta_lines[2] if len(meta_lines) > 2 else None
-        duration = float(duration_str) if duration_str and duration_str != 'NA' else None
+        import yt_dlp
+
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'outtmpl': output_template,
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '5',
+            }],
+            'noplaylist': True,
+            'nocheckcertificate': True,
+            'quiet': True,
+            'no_warnings': True,
+        }
+
+        if cookies_path:
+            ydl_opts['cookiefile'] = cookies_path
+            ydl_opts['http_headers'] = {
+                'User-Agent': BROWSER_USER_AGENT,
+                'Referer': 'https://www.bilibili.com',
+            }
+
+        # 提取元数据 + 下载
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            title = info.get('title', 'Untitled')
+            author = info.get('uploader') or info.get('channel')
+            duration = info.get('duration')
+
+        logger.info(f"✓ yt-dlp download complete: {title}")
+
     except Exception as e:
-        logger.warning(f"Failed to extract metadata: {e}")
-        title = 'Untitled'
-        author = None
-        duration = None
-
-    # 下载音频（提取为 mp3）
-    logger.info(f"Downloading audio: {url}")
-    try:
-        download_cmd = [
-            'yt-dlp',
-            '-x',  # 只提取音频
-            '--audio-format', 'mp3',
-            '--audio-quality', '5',  # 中等质量，减小文件
-            '-o', output_template,
-            '--no-warnings',
-            '--no-check-certificates',
-            '--no-playlist',  # 不下载播放列表
-            *cookies_args,
-            url
-        ]
-        result = subprocess.run(
-            download_cmd, capture_output=True, text=True, timeout=600
-        )
-
-        if result.returncode != 0:
-            raise RuntimeError(f"yt-dlp failed: {result.stderr}")
-
-    except subprocess.TimeoutExpired:
-        raise RuntimeError("Audio download timed out (10 min)")
-
-    # 清理 cookies 文件
-    cookies_file = os.path.join(download_dir, 'cookies.txt')
-    if os.path.exists(cookies_file):
-        os.remove(cookies_file)
+        raise RuntimeError(f"yt-dlp failed: {e}")
+    finally:
+        # 清理 cookies 文件
+        if cookies_path and os.path.exists(cookies_path):
+            os.remove(cookies_path)
 
     # 查找下载的文件
     audio_files = [
