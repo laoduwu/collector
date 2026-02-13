@@ -90,69 +90,109 @@ def _needs_cookies(url: str) -> bool:
         return False
 
 
-async def _fetch_cookies_with_playwright(url: str) -> Optional[str]:
+async def _extract_bilibili_audio(url: str, download_dir: str) -> MediaMetadata:
     """
-    用 Playwright 访问页面，完成 JS 验证后导出 Netscape cookies.txt
+    用 Playwright 拦截 Bilibili 音频流 URL，再用 ffmpeg 下载
+
+    绕过 yt-dlp 的 Bilibili extractor 412 问题。
 
     Args:
-        url: 需要访问的页面 URL
+        url: Bilibili 视频 URL
+        download_dir: 音频保存目录
 
     Returns:
-        cookies.txt 文件路径，失败返回 None
+        MediaMetadata
+
+    Raises:
+        RuntimeError: 提取失败
     """
     try:
         from playwright.async_api import async_playwright
     except ImportError:
-        logger.warning("Playwright not available, cannot fetch cookies")
-        return None
+        raise RuntimeError("Playwright not available")
 
-    cookies_path = os.path.join(config.DOWNLOADS_DIR, 'media', 'cookies.txt')
-    os.makedirs(os.path.dirname(cookies_path), exist_ok=True)
+    logger.info(f"Extracting Bilibili audio via Playwright: {url}")
+    audio_urls = []
 
-    logger.info(f"Fetching cookies via Playwright: {url}")
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(
+            user_agent=BROWSER_USER_AGENT
+        )
+        page = await context.new_page()
+
+        # 拦截网络请求，捕获音频流 URL
+        def on_response(response):
+            resp_url = response.url
+            # B 站音频流特征：包含 /audio/ 或 mime=audio 或 30280（音频流标识）
+            if any(kw in resp_url for kw in ('.m4s', '/audio/', 'mime=audio')):
+                audio_urls.append(resp_url)
+
+        page.on('response', on_response)
+
+        # 访问视频页
+        await page.goto(url, wait_until='networkidle', timeout=30000)
+        await page.wait_for_timeout(5000)
+
+        # 提取标题和作者
+        title = await page.title() or 'Untitled'
+        # 清理标题（去掉 _哔哩哔哩_bilibili 后缀）
+        title = re.sub(r'[_\-]\s*哔哩哔哩.*$', '', title).strip()
+
+        author = None
+        try:
+            author_el = await page.query_selector('.up-name, .username, [class*="upname"]')
+            if author_el:
+                author = (await author_el.text_content() or '').strip()
+        except Exception:
+            pass
+
+        # 获取 cookies 用于 ffmpeg 下载
+        cookies = await context.cookies()
+        cookie_header = '; '.join(f"{c['name']}={c['value']}" for c in cookies)
+
+        await browser.close()
+
+    if not audio_urls:
+        raise RuntimeError("No audio stream URL found on Bilibili page")
+
+    # 选取第一个音频流 URL
+    audio_stream_url = audio_urls[0]
+    logger.info(f"Found audio stream URL ({len(audio_urls)} total)")
+
+    # 用 ffmpeg 下载音频流并转为 mp3
+    # 生成安全的文件名
+    safe_title = re.sub(r'[^\w\u4e00-\u9fff\-]', '_', title)[:50]
+    audio_path = os.path.join(download_dir, f'{safe_title}.mp3')
+
+    logger.info(f"Downloading audio stream with ffmpeg...")
     try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context(
-                user_agent=BROWSER_USER_AGENT
-            )
-            page = await context.new_page()
+        result = subprocess.run(
+            [
+                'ffmpeg', '-y',
+                '-headers', f'User-Agent: {BROWSER_USER_AGENT}\r\nReferer: https://www.bilibili.com\r\nCookie: {cookie_header}',
+                '-i', audio_stream_url,
+                '-vn',  # 无视频
+                '-acodec', 'libmp3lame',
+                '-q:a', '5',
+                audio_path
+            ],
+            capture_output=True, text=True, timeout=300
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg failed: {result.stderr[:500]}")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("ffmpeg download timed out (5 min)")
 
-            # 先访问 bilibili 首页触发基础 cookie 设置
-            await page.goto('https://www.bilibili.com', wait_until='networkidle', timeout=30000)
-            await page.wait_for_timeout(3000)
+    file_size = os.path.getsize(audio_path) / 1024 / 1024
+    logger.info(f"✓ Audio downloaded: {audio_path} ({file_size:.1f} MB)")
 
-            # 再访问目标视频页，触发完整的 JS 验证
-            await page.goto(url, wait_until='networkidle', timeout=30000)
-            await page.wait_for_timeout(5000)
-
-            cookies = await context.cookies()
-            logger.info(f"Cookies obtained: {[c['name'] for c in cookies]}")
-            await browser.close()
-
-        if not cookies:
-            logger.warning("No cookies obtained from Playwright")
-            return None
-
-        # 写入 Netscape cookies.txt 格式
-        with open(cookies_path, 'w') as f:
-            f.write("# Netscape HTTP Cookie File\n")
-            for c in cookies:
-                domain = c.get('domain', '')
-                include_subdomains = 'TRUE' if domain.startswith('.') else 'FALSE'
-                path = c.get('path', '/')
-                secure = 'TRUE' if c.get('secure', False) else 'FALSE'
-                expires = str(int(c.get('expires', 0)))
-                name = c.get('name', '')
-                value = c.get('value', '')
-                f.write(f"{domain}\t{include_subdomains}\t{path}\t{secure}\t{expires}\t{name}\t{value}\n")
-
-        logger.info(f"Cookies saved: {cookies_path} ({len(cookies)} cookies)")
-        return cookies_path
-
-    except Exception as e:
-        logger.warning(f"Failed to fetch cookies with Playwright: {e}")
-        return None
+    return MediaMetadata(
+        title=title,
+        author=author,
+        duration=None,
+        audio_path=audio_path
+    )
 
 
 def is_media_url(url: str) -> bool:
@@ -219,17 +259,12 @@ async def extract_audio(url: str) -> MediaMetadata:
     download_dir = os.path.join(config.DOWNLOADS_DIR, 'media')
     os.makedirs(download_dir, exist_ok=True)
 
-    output_template = os.path.join(download_dir, '%(id)s.%(ext)s')
-
-    # 如果需要 cookies，先用 Playwright 获取
-    cookies_path = None
+    # Bilibili 走专用 Playwright 提取（绕过 yt-dlp 412 问题）
     if _needs_cookies(url):
-        logger.info("Site requires cookies, fetching via Playwright...")
-        cookies_path = await _fetch_cookies_with_playwright(url)
-        if not cookies_path:
-            logger.warning("Failed to obtain cookies, trying without...")
+        return await _extract_bilibili_audio(url, download_dir)
 
-    # 用 yt-dlp Python API 下载（可精确控制 headers/cookies）
+    # 其他平台用 yt-dlp
+    output_template = os.path.join(download_dir, '%(id)s.%(ext)s')
     logger.info(f"Downloading audio with yt-dlp: {url}")
     try:
         import yt_dlp
@@ -248,14 +283,6 @@ async def extract_audio(url: str) -> MediaMetadata:
             'no_warnings': True,
         }
 
-        if cookies_path:
-            ydl_opts['cookiefile'] = cookies_path
-            ydl_opts['http_headers'] = {
-                'User-Agent': BROWSER_USER_AGENT,
-                'Referer': 'https://www.bilibili.com',
-            }
-
-        # 提取元数据 + 下载
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             title = info.get('title', 'Untitled')
@@ -266,10 +293,6 @@ async def extract_audio(url: str) -> MediaMetadata:
 
     except Exception as e:
         raise RuntimeError(f"yt-dlp failed: {e}")
-    finally:
-        # 清理 cookies 文件
-        if cookies_path and os.path.exists(cookies_path):
-            os.remove(cookies_path)
 
     # 查找下载的文件
     audio_files = [
