@@ -5,6 +5,9 @@ import tempfile
 import subprocess
 from dataclasses import dataclass
 from typing import Optional, List, Tuple
+from urllib.parse import urlparse
+
+import requests
 
 from utils.logger import logger
 from utils.config import config
@@ -22,6 +25,9 @@ MEDIA_DOMAINS = {
     # 其他音视频平台
     'vimeo.com', 'dailymotion.com', 'twitch.tv',
 }
+
+# 需要解析重定向的短链域名
+SHORT_LINK_DOMAINS = {'b23.tv'}
 
 
 @dataclass
@@ -41,6 +47,32 @@ class TranscriptSegment:
     text: str
 
 
+def resolve_short_link(url: str) -> str:
+    """
+    解析短链重定向，返回最终 URL
+
+    Args:
+        url: 可能是短链的 URL
+
+    Returns:
+        解析后的真实 URL（如果不是短链则原样返回）
+    """
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname or ''
+        if hostname not in SHORT_LINK_DOMAINS:
+            return url
+
+        logger.info(f"Resolving short link: {url}")
+        resp = requests.head(url, allow_redirects=True, timeout=10)
+        resolved = resp.url
+        logger.info(f"Resolved to: {resolved}")
+        return resolved
+    except Exception as e:
+        logger.warning(f"Failed to resolve short link {url}: {e}")
+        return url
+
+
 def is_media_url(url: str) -> bool:
     """
     检测 URL 是否为视频/音频平台
@@ -53,9 +85,11 @@ def is_media_url(url: str) -> bool:
     Returns:
         是否为媒体 URL
     """
+    # 先解析短链
+    url = resolve_short_link(url)
+
     # 快速域名匹配
     try:
-        from urllib.parse import urlparse
         parsed = urlparse(url)
         hostname = parsed.hostname or ''
         # 去掉 www. 前缀后再匹配
@@ -94,6 +128,9 @@ def extract_audio(url: str) -> MediaMetadata:
     Raises:
         RuntimeError: 下载失败
     """
+    # 解析短链
+    url = resolve_short_link(url)
+
     # 确保下载目录存在
     download_dir = os.path.join(config.DOWNLOADS_DIR, 'media')
     os.makedirs(download_dir, exist_ok=True)
@@ -109,6 +146,7 @@ def extract_audio(url: str) -> MediaMetadata:
                 '--no-download',
                 '--print', '%(title)s\n%(uploader)s\n%(duration)s',
                 '--no-warnings',
+                '--no-check-certificates',
                 url
             ],
             capture_output=True, text=True, timeout=30
@@ -135,6 +173,7 @@ def extract_audio(url: str) -> MediaMetadata:
                 '--audio-quality', '5',  # 中等质量，减小文件
                 '-o', output_template,
                 '--no-warnings',
+                '--no-check-certificates',
                 '--no-playlist',  # 不下载播放列表
                 url
             ],
