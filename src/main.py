@@ -76,7 +76,10 @@ class ArticleCollector:
         """
         if is_media_url(url):
             logger.info(f"Detected media URL: {url}")
-            return await self.process_media(url)
+            result = await self.process_media(url)
+            if result:
+                return result
+            logger.warning("Media processing failed, falling back to article scraping...")
         return await self.process_article(url)
 
     async def process_media(self, url: str) -> Optional[str]:
