@@ -114,11 +114,17 @@ async def _fetch_cookies_with_playwright(url: str) -> Optional[str]:
                 user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
             )
             page = await context.new_page()
-            await page.goto(url, wait_until='networkidle', timeout=30000)
-            # 等待 JS 验证完成
+
+            # 先访问 bilibili 首页触发基础 cookie 设置
+            await page.goto('https://www.bilibili.com', wait_until='networkidle', timeout=30000)
             await page.wait_for_timeout(3000)
 
+            # 再访问目标视频页，触发完整的 JS 验证
+            await page.goto(url, wait_until='networkidle', timeout=30000)
+            await page.wait_for_timeout(5000)
+
             cookies = await context.cookies()
+            logger.info(f"Cookies obtained: {[c['name'] for c in cookies]}")
             await browser.close()
 
         if not cookies:
