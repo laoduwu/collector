@@ -203,10 +203,13 @@ async function handleMessageEventOld(body) {
 }
 
 /**
- * 从文本中提取URL
+ * 从文本中提取URL（支持中文混排）
+ * 中文文本通常没有空格分隔，需要在URL合法字符范围内截断
  */
 function extractURL(text) {
-  const urlRegex = /(https?:\/\/[^\s]+)/gi
+  // URL合法字符：字母、数字、以及 -._~:/?#[]@!$&'()*+,;=%
+  // 排除中文字符、中文标点及其他非URL字符
+  const urlRegex = /(https?:\/\/[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+)/gi
   const matches = text.match(urlRegex)
   return matches && matches.length > 0 ? matches[0] : null
 }
