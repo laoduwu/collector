@@ -48,6 +48,17 @@ Webhook接收器需要从消息中**提取第一个有效URL**，忽略其余文
 - 处理流程: yt-dlp 提取音频 → faster-whisper 本地转录 → Gemini 语义排版 → Markdown → HTML → 飞书文档
 - 全部免费，无需额外 API Key（faster-whisper 本地运行，Gemini 免费额度）
 - 媒体文档无图片流程（跳过图片下载/上传/CDN 步骤）
+- 降级策略: 媒体提取失败时自动降级为 Playwright 文章抓取
+
+### Bilibili 反爬处理
+
+B 站对非中国 IP 返回 HTTP 412，要求完成 JS 验证挑战生成验证 cookie。
+GitHub Actions（美国 IP）必须先获取 cookie 才能下载。
+
+解决方案: 用 Playwright 无头浏览器先访问 B 站视频页，完成 JS 验证后导出 cookies 文件给 yt-dlp。
+- Playwright 访问视频页 → 等待 JS 验证完成 → 导出 Netscape cookies.txt
+- yt-dlp 使用 `--cookies cookies.txt` 参数下载
+- 项目已有 Playwright 依赖，无需新增
 
 ## 项目结构
 

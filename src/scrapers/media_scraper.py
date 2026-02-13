@@ -29,6 +29,9 @@ MEDIA_DOMAINS = {
 # 需要解析重定向的短链域名
 SHORT_LINK_DOMAINS = {'b23.tv'}
 
+# 需要通过 Playwright 获取 cookies 的域名（反爬严格）
+COOKIE_REQUIRED_DOMAINS = {'bilibili.com', 'www.bilibili.com'}
+
 
 @dataclass
 class MediaMetadata:
@@ -73,6 +76,76 @@ def resolve_short_link(url: str) -> str:
         return url
 
 
+def _needs_cookies(url: str) -> bool:
+    """检查 URL 是否需要通过浏览器获取 cookies"""
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname or ''
+        bare_host = hostname.removeprefix('www.')
+        return hostname in COOKIE_REQUIRED_DOMAINS or bare_host in COOKIE_REQUIRED_DOMAINS
+    except Exception:
+        return False
+
+
+async def _fetch_cookies_with_playwright(url: str) -> Optional[str]:
+    """
+    用 Playwright 访问页面，完成 JS 验证后导出 Netscape cookies.txt
+
+    Args:
+        url: 需要访问的页面 URL
+
+    Returns:
+        cookies.txt 文件路径，失败返回 None
+    """
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        logger.warning("Playwright not available, cannot fetch cookies")
+        return None
+
+    cookies_path = os.path.join(config.DOWNLOADS_DIR, 'media', 'cookies.txt')
+    os.makedirs(os.path.dirname(cookies_path), exist_ok=True)
+
+    logger.info(f"Fetching cookies via Playwright: {url}")
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+            )
+            page = await context.new_page()
+            await page.goto(url, wait_until='networkidle', timeout=30000)
+            # 等待 JS 验证完成
+            await page.wait_for_timeout(3000)
+
+            cookies = await context.cookies()
+            await browser.close()
+
+        if not cookies:
+            logger.warning("No cookies obtained from Playwright")
+            return None
+
+        # 写入 Netscape cookies.txt 格式
+        with open(cookies_path, 'w') as f:
+            f.write("# Netscape HTTP Cookie File\n")
+            for c in cookies:
+                domain = c.get('domain', '')
+                include_subdomains = 'TRUE' if domain.startswith('.') else 'FALSE'
+                path = c.get('path', '/')
+                secure = 'TRUE' if c.get('secure', False) else 'FALSE'
+                expires = str(int(c.get('expires', 0)))
+                name = c.get('name', '')
+                value = c.get('value', '')
+                f.write(f"{domain}\t{include_subdomains}\t{path}\t{secure}\t{expires}\t{name}\t{value}\n")
+
+        logger.info(f"Cookies saved: {cookies_path} ({len(cookies)} cookies)")
+        return cookies_path
+
+    except Exception as e:
+        logger.warning(f"Failed to fetch cookies with Playwright: {e}")
+        return None
+
+
 def is_media_url(url: str) -> bool:
     """
     检测 URL 是否为视频/音频平台
@@ -115,9 +188,11 @@ def is_media_url(url: str) -> bool:
     return False
 
 
-def extract_audio(url: str) -> MediaMetadata:
+async def extract_audio(url: str) -> MediaMetadata:
     """
     用 yt-dlp 下载音频并提取元数据
+
+    对需要 cookies 的站点（如 Bilibili），先用 Playwright 获取 cookies。
 
     Args:
         url: 媒体 URL
@@ -137,19 +212,30 @@ def extract_audio(url: str) -> MediaMetadata:
 
     output_template = os.path.join(download_dir, '%(id)s.%(ext)s')
 
+    # 如果需要 cookies，先用 Playwright 获取
+    cookies_args = []
+    if _needs_cookies(url):
+        logger.info("Site requires cookies, fetching via Playwright...")
+        cookies_path = await _fetch_cookies_with_playwright(url)
+        if cookies_path:
+            cookies_args = ['--cookies', cookies_path]
+        else:
+            logger.warning("Failed to obtain cookies, trying without...")
+
     # 先提取元数据
     logger.info(f"Extracting media metadata: {url}")
     try:
+        meta_cmd = [
+            'yt-dlp',
+            '--no-download',
+            '--print', '%(title)s\n%(uploader)s\n%(duration)s',
+            '--no-warnings',
+            '--no-check-certificates',
+            *cookies_args,
+            url
+        ]
         meta_result = subprocess.run(
-            [
-                'yt-dlp',
-                '--no-download',
-                '--print', '%(title)s\n%(uploader)s\n%(duration)s',
-                '--no-warnings',
-                '--no-check-certificates',
-                url
-            ],
-            capture_output=True, text=True, timeout=30
+            meta_cmd, capture_output=True, text=True, timeout=30
         )
         meta_lines = meta_result.stdout.strip().split('\n')
         title = meta_lines[0] if len(meta_lines) > 0 and meta_lines[0] != 'NA' else 'Untitled'
@@ -165,19 +251,20 @@ def extract_audio(url: str) -> MediaMetadata:
     # 下载音频（提取为 mp3）
     logger.info(f"Downloading audio: {url}")
     try:
+        download_cmd = [
+            'yt-dlp',
+            '-x',  # 只提取音频
+            '--audio-format', 'mp3',
+            '--audio-quality', '5',  # 中等质量，减小文件
+            '-o', output_template,
+            '--no-warnings',
+            '--no-check-certificates',
+            '--no-playlist',  # 不下载播放列表
+            *cookies_args,
+            url
+        ]
         result = subprocess.run(
-            [
-                'yt-dlp',
-                '-x',  # 只提取音频
-                '--audio-format', 'mp3',
-                '--audio-quality', '5',  # 中等质量，减小文件
-                '-o', output_template,
-                '--no-warnings',
-                '--no-check-certificates',
-                '--no-playlist',  # 不下载播放列表
-                url
-            ],
-            capture_output=True, text=True, timeout=600  # 10分钟超时
+            download_cmd, capture_output=True, text=True, timeout=600
         )
 
         if result.returncode != 0:
@@ -185,6 +272,11 @@ def extract_audio(url: str) -> MediaMetadata:
 
     except subprocess.TimeoutExpired:
         raise RuntimeError("Audio download timed out (10 min)")
+
+    # 清理 cookies 文件
+    cookies_file = os.path.join(download_dir, 'cookies.txt')
+    if os.path.exists(cookies_file):
+        os.remove(cookies_file)
 
     # 查找下载的文件
     audio_files = [

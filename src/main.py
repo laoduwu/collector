@@ -100,7 +100,7 @@ class ArticleCollector:
         try:
             # Step 1: 提取音频
             logger.info("Step 1/5: Extracting audio...")
-            metadata = extract_audio(url)
+            metadata = await extract_audio(url)
             audio_path = metadata.audio_path
             logger.info(f"✓ Audio extracted: {metadata.title}")
             if metadata.duration:
