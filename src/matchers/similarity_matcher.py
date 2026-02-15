@@ -139,6 +139,11 @@ class SimilarityMatcher:
             # 按相似度排序
             similarities.sort(key=lambda x: x[1], reverse=True)
 
+            # 输出所有目录的匹配分数
+            logger.info("Similarity scores for all directories:")
+            for directory, sim in similarities:
+                logger.info(f"  {directory.name}: {sim:.3f}")
+
             # 获取最佳匹配
             best_directory, best_similarity = similarities[0]
 
