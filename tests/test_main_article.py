@@ -1,0 +1,56 @@
+import base64
+import os
+from unittest.mock import patch, MagicMock, AsyncMock
+import pytest
+
+
+@pytest.mark.asyncio
+async def test_article_flow_success(monkeypatch):
+    monkeypatch.setenv('ARTICLE_ID', 'a-1')
+    monkeypatch.setenv('SOURCE_URL', 'https://mp.weixin.qq.com/s/xxx')
+    monkeypatch.setenv('CONTENT_TYPE', 'article')
+    monkeypatch.setenv('CALLBACK_URL', 'https://x.supabase.co/functions/v1/actions-callback')
+    monkeypatch.setenv('CALLBACK_TOKEN', 't')
+
+    from main import run
+
+    fake_article = MagicMock()
+    fake_article.title = 'T'
+    fake_article.content = '正文 https://mmbiz.qpic.cn/x.jpg 后续'
+    fake_article.images = ['https://mmbiz.qpic.cn/x.jpg']
+
+    with patch('main.PlaywrightScraper') as Scraper, \
+         patch('main.download_to_bytes', return_value=('x.jpg', b'PNG')) as dl, \
+         patch('main.post_callback') as cb:
+        Scraper.return_value.scrape = AsyncMock(return_value=fake_article)
+        await run()
+
+        sent = cb.call_args.args[0]
+        assert sent['article_id'] == 'a-1'
+        assert sent['status'] == 'success'
+        assert sent['title'] == 'T'
+        assert 'x.jpg' in sent['article_images']
+        assert base64.b64decode(sent['article_images']['x.jpg']) == b'PNG'
+        assert '![[x.jpg]]' in sent['content_md']
+        # Referer 传到了 downloader
+        assert dl.call_args.kwargs.get('referer') == 'https://mp.weixin.qq.com/'
+
+
+@pytest.mark.asyncio
+async def test_article_flow_failure_reports_error(monkeypatch):
+    monkeypatch.setenv('ARTICLE_ID', 'a-2')
+    monkeypatch.setenv('SOURCE_URL', 'https://bad.example/404')
+    monkeypatch.setenv('CONTENT_TYPE', 'article')
+    monkeypatch.setenv('CALLBACK_URL', 'https://x.supabase.co/functions/v1/actions-callback')
+    monkeypatch.setenv('CALLBACK_TOKEN', 't')
+
+    from main import run
+
+    with patch('main.PlaywrightScraper') as Scraper, \
+         patch('main.post_callback') as cb:
+        Scraper.return_value.scrape = AsyncMock(side_effect=RuntimeError('boom'))
+        await run()
+        sent = cb.call_args.args[0]
+        assert sent['article_id'] == 'a-2'
+        assert sent['status'] == 'error'
+        assert 'boom' in sent['error_message']

@@ -5,13 +5,26 @@ on:
     types: [scrape-article]
   workflow_dispatch:
     inputs:
-      article_url:
-        description: 'Article URL to scrape'
+      article_id:
+        description: 'Article ID (for manual testing)'
+        required: true
+        type: string
+      source_url:
+        description: 'Source URL'
+        required: true
+        type: string
+      content_type:
+        description: 'article | youtube'
+        required: true
+        default: 'article'
+        type: string
+      callback_url:
+        description: 'Supabase actions-callback URL'
         required: true
         type: string
 
 concurrency:
-  group: scrape-article
+  group: scrape-${{ github.event.client_payload.article_id || inputs.article_id }}
   cancel-in-progress: false
 
 jobs:
@@ -20,63 +33,41 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Install Python dependencies
+      - name: Install Python deps
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Install system dependencies
+      - name: Install Playwright Chromium
         run: |
-          # ffmpeg for yt-dlp audio conversion
-          sudo apt-get update && sudo apt-get install -y ffmpeg
-
-      - name: Install Playwright browsers
-        run: |
-          # 安装Playwright Chromium浏览器
           python -m playwright install chromium
           python -m playwright install-deps chromium
 
       - name: Run scraper
         env:
-          # 从repository_dispatch或workflow_dispatch获取URL
-          ARTICLE_URL: ${{ github.event.client_payload.url || inputs.article_url }}
-          # 飞书配置
-          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
-          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
-          FEISHU_VERIFICATION_TOKEN: ${{ secrets.FEISHU_VERIFICATION_TOKEN }}
-          FEISHU_ENCRYPT_KEY: ${{ secrets.FEISHU_ENCRYPT_KEY }}
-          FEISHU_KNOWLEDGE_SPACE_ID: ${{ secrets.FEISHU_KNOWLEDGE_SPACE_ID }}
-          FEISHU_UNORGANIZED_FOLDER_NAME: ${{ secrets.FEISHU_UNORGANIZED_FOLDER_NAME || '待整理' }}
-          # LLM配置（目录分类匹配）
-          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta/openai' }}
-          LLM_MODEL: ${{ secrets.LLM_MODEL || 'gemini-2.5-flash' }}
-          # GitHub配置（图片托管）
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
-          IMAGE_REPO: ${{ secrets.IMAGE_REPO }}
-          IMAGE_BRANCH: ${{ secrets.IMAGE_BRANCH || 'main' }}
-          # 日志配置
-          LOG_LEVEL: ${{ secrets.LOG_LEVEL || 'INFO' }}
-          # Python路径配置
+          ARTICLE_ID:    ${{ github.event.client_payload.article_id || inputs.article_id }}
+          SOURCE_URL:    ${{ github.event.client_payload.source_url || inputs.source_url }}
+          CONTENT_TYPE:  ${{ github.event.client_payload.content_type || inputs.content_type }}
+          CALLBACK_URL:  ${{ github.event.client_payload.callback_url || inputs.callback_url }}
+          CALLBACK_TOKEN: ${{ secrets.ROCBASE_CALLBACK_TOKEN }}
+          LOG_LEVEL: INFO
           PYTHONPATH: ${{ github.workspace }}/src
         run: |
           cd src
-          python main.py "$ARTICLE_URL"
+          python main.py
 
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: scraper-logs
+          name: scraper-logs-${{ github.run_id }}
           path: |
             *.log
             logs/
