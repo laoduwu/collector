@@ -17,12 +17,16 @@ async def test_article_flow_success(monkeypatch):
     fake_article = MagicMock()
     fake_article.title = 'T'
     fake_article.author = '某公众号'
-    fake_article.content = '正文 https://mmbiz.qpic.cn/x.jpg 后续'
-    fake_article.images = ['https://mmbiz.qpic.cn/x.jpg']
-    fake_article.content_html = None
+    fake_article.content = '纯文本备用'
+    fake_article.images = []
+    # 微信图片在 content_html 里以 <img src> 出现；markdownify 转出 ![](url)
+    fake_article.content_html = (
+        '<p>正文</p>'
+        '<img src="https://mmbiz.qpic.cn/x/640?wx_fmt=png">'
+    )
 
     with patch('main.PlaywrightScraper') as Scraper, \
-         patch('main.download_to_bytes', return_value=('x.jpg', b'PNG')) as dl, \
+         patch('main.download_to_bytes', return_value=('640.png', b'PNG')) as dl, \
          patch('main.post_callback') as cb:
         Scraper.return_value.scrape = AsyncMock(return_value=fake_article)
         await run()
@@ -32,10 +36,12 @@ async def test_article_flow_success(monkeypatch):
         assert sent['status'] == 'success'
         assert sent['title'] == 'T'
         assert sent['author'] == '某公众号'
-        assert 'x.jpg' in sent['article_images']
-        assert base64.b64decode(sent['article_images']['x.jpg']) == b'PNG'
-        assert '![[x.jpg]]' in sent['content_md']
-        # Referer 传到了 downloader
+        assert '640.png' in sent['article_images']
+        assert base64.b64decode(sent['article_images']['640.png']) == b'PNG'
+        # 正文里图片被替换为 Obsidian 内部链接，不再有原始 URL
+        assert '![[640.png]]' in sent['content_md']
+        assert 'mmbiz.qpic.cn' not in sent['content_md']
+        # 微信图片下载带了防盗链 Referer
         assert dl.call_args.kwargs.get('referer') == 'https://mp.weixin.qq.com/'
 
 

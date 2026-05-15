@@ -23,18 +23,45 @@ else:
 WECHAT_REFERER = "https://mp.weixin.qq.com/"
 
 
-def _replace_image_urls_with_filenames(
-    content: str,
-    url_to_filename: Dict[str, str],
-) -> str:
-    """把正文里的图片 URL 替换为 Obsidian 内部链接 ![[文件名]]。"""
-    for url, fname in url_to_filename.items():
-        content = re.sub(
-            re.escape(url),
-            f'![[{fname}]]',
-            content,
-        )
-    return content
+# Markdown 图片语法：![alt](url)。微信图片 URL 不含 ')' 与空白，匹配安全。
+IMG_MD_RE = re.compile(r'!\[[^\]]*\]\((https?://[^)\s]+)\)')
+
+
+def _localize_images(markdown: str) -> tuple[str, Dict[str, str]]:
+    """从 markdown 正文提取所有图片 URL，下载为 base64，
+    并把 ![alt](url) 替换为 Obsidian 内部链接 ![[文件名]]。
+
+    直接以正文里实际出现的 URL 为准，不依赖抓取器的 images 列表
+    （markdownify 后图片 URL 来自 <img src>，与 data-src 可能不一致）。
+
+    返回 (新 markdown, {文件名: base64})。
+    """
+    images_b64: Dict[str, str] = {}
+    url_to_fname: Dict[str, str] = {}
+
+    for m in IMG_MD_RE.finditer(markdown):
+        url = m.group(1)
+        if url in url_to_fname:
+            continue
+        try:
+            referer = WECHAT_REFERER if 'mmbiz.qpic.cn' in url else None
+            fname, raw = download_to_bytes(url, referer=referer)
+            base_fname = fname
+            i = 1
+            while fname in images_b64:
+                stem, _, ext = base_fname.rpartition('.')
+                fname = f"{stem}_{i}.{ext}" if ext else f"{base_fname}_{i}"
+                i += 1
+            images_b64[fname] = base64.b64encode(raw).decode('ascii')
+            url_to_fname[url] = fname
+        except Exception as e:
+            logger.warning(f"图片下载失败，跳过 {url}: {e}")
+
+    def _sub(m: "re.Match[str]") -> str:
+        fname = url_to_fname.get(m.group(1))
+        return f'![[{fname}]]' if fname else m.group(0)
+
+    return IMG_MD_RE.sub(_sub, markdown), images_b64
 
 
 async def _handle_article(article_id: str, source_url: str) -> Dict[str, Any]:
@@ -45,30 +72,13 @@ async def _handle_article(article_id: str, source_url: str) -> Dict[str, Any]:
     scraper = PlaywrightScraper(headless=True)
     article = await scraper.scrape(source_url)
 
-    images_b64: Dict[str, str] = {}
-    url_to_filename: Dict[str, str] = {}
-    for img_url in article.images or []:
-        try:
-            referer = WECHAT_REFERER if 'mmbiz.qpic.cn' in img_url else None
-            fname, raw = download_to_bytes(img_url, referer=referer)
-            base_fname = fname
-            i = 1
-            while fname in images_b64:
-                stem, _, ext = base_fname.rpartition('.')
-                fname = f"{stem}_{i}.{ext}"
-                i += 1
-            images_b64[fname] = base64.b64encode(raw).decode('ascii')
-            url_to_filename[img_url] = fname
-        except Exception as e:
-            logger.warning(f"图片下载失败，跳过 {img_url}: {e}")
-
     # 优先使用 HTML 抓取并转 Markdown（保留代码块、引用、加粗等格式）
     raw_md = (
         html_to_md(article.content_html, heading_style='ATX', bullets='-')
         if getattr(article, 'content_html', None)
         else article.content
     )
-    content = _replace_image_urls_with_filenames(raw_md, url_to_filename)
+    content, images_b64 = _localize_images(raw_md)
 
     return {
         "article_id": article_id,
