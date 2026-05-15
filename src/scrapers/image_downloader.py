@@ -142,3 +142,41 @@ class ImageDownloader:
                 logger.info("Cleaned up downloads directory")
         except Exception as e:
             logger.warning(f"Failed to cleanup downloads: {str(e)}")
+
+
+from typing import Optional
+from urllib.parse import urlparse
+
+
+def download_to_bytes(
+    url: str,
+    referer: Optional[str] = None,
+    timeout: int = 30,
+) -> Tuple[str, bytes]:
+    """下载图片到内存。返回 (建议文件名, bytes)。
+
+    建议文件名：URL 路径末段；若无扩展名，根据 Content-Type 推断。
+    """
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
+        ),
+    }
+    if referer:
+        headers["Referer"] = referer
+
+    resp = requests.get(url, headers=headers, timeout=timeout)
+    resp.raise_for_status()
+
+    parsed = urlparse(url)
+    base = parsed.path.rsplit('/', 1)[-1] or hashlib.md5(url.encode()).hexdigest()[:12]
+    if '.' not in base:
+        ct = resp.headers.get('Content-Type', '').split(';')[0].strip()
+        ext = {
+            'image/jpeg': '.jpg', 'image/png': '.png',
+            'image/gif': '.gif',  'image/webp': '.webp',
+        }.get(ct, '.jpg')
+        base += ext
+
+    return base, resp.content
