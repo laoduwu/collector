@@ -9,6 +9,7 @@ from typing import Any, Dict
 from utils.logger import logger
 from utils.callback import post_callback
 from scrapers.image_downloader import download_to_bytes
+from markdownify import markdownify as html_to_md
 
 try:
     from scrapers.playwright_scraper import PlaywrightScraper
@@ -61,12 +62,19 @@ async def _handle_article(article_id: str, source_url: str) -> Dict[str, Any]:
         except Exception as e:
             logger.warning(f"图片下载失败，跳过 {img_url}: {e}")
 
-    content = _replace_image_urls_with_filenames(article.content, url_to_filename)
+    # 优先使用 HTML 抓取并转 Markdown（保留代码块、引用、加粗等格式）
+    raw_md = (
+        html_to_md(article.content_html, heading_style='ATX', bullets='-')
+        if getattr(article, 'content_html', None)
+        else article.content
+    )
+    content = _replace_image_urls_with_filenames(raw_md, url_to_filename)
 
     return {
         "article_id": article_id,
         "status": "success",
         "title": article.title,
+        "author": getattr(article, "author", None),
         "content_md": content,
         "article_images": images_b64,
     }
