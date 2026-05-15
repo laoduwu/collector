@@ -1,4 +1,9 @@
-"""GitHub Actions 入口 - 抓取并回调 Supabase"""
+"""GitHub Actions 入口 - 抓取并回调 Supabase
+
+文章正文采用 HTML 直存方案：保留微信内联 CSS 排版（居中图注、引用、
+分割线、列表样式等），图片以 base64 data URI 内联到 <img src>，
+Obsidian 阅读视图直接渲染，不依赖附件路径。
+"""
 import asyncio
 import base64
 import os
@@ -11,7 +16,6 @@ from bs4 import BeautifulSoup
 from utils.logger import logger
 from utils.callback import post_callback
 from scrapers.image_downloader import download_to_bytes
-from markdownify import markdownify as html_to_md
 
 try:
     from scrapers.playwright_scraper import PlaywrightScraper
@@ -24,15 +28,28 @@ else:
 
 WECHAT_REFERER = "https://mp.weixin.qq.com/"
 
-
-# 微信公众号图片懒加载：真实地址在 data-src，src 是 1x1 占位 SVG。
-# markdownify 之前必须把 data-src 提升为 src，否则正文只剩占位图。
+# 微信图片懒加载：真实地址在 data-src，src 是 1x1 占位 SVG
 _LAZY_ATTRS = ('data-src', 'data-original', 'data-actualsrc', 'data-backsrc')
 
+_MIME_BY_EXT = {
+    '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
+    '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml',
+}
 
-def _delazy_html(html: str) -> str:
-    """把 <img> 懒加载真实地址提升为 src，清掉懒加载占位属性。"""
+
+def _guess_mime(filename: str) -> str:
+    ext = filename[filename.rfind('.'):].lower() if '.' in filename else ''
+    return _MIME_BY_EXT.get(ext, 'image/jpeg')
+
+
+def _clean_html(html: str) -> str:
+    """清洗微信正文 HTML：
+    1. 懒加载 data-src 提升为 src
+    2. 删除 script/style/iframe 等无用/危险标签（保留元素 style 属性）
+    3. 图片下载并以 base64 data URI 内联（Obsidian 渲染稳定，自包含）
+    """
     soup = BeautifulSoup(html, 'html.parser')
+
     for img in soup.find_all('img'):
         real = next((img.get(a) for a in _LAZY_ATTRS if img.get(a)), None)
         if real:
@@ -40,48 +57,30 @@ def _delazy_html(html: str) -> str:
         for a in _LAZY_ATTRS:
             if img.has_attr(a):
                 del img[a]
+
+    for tag in soup.find_all(['script', 'style', 'iframe', 'noscript']):
+        tag.decompose()
+
+    for img in soup.find_all('img'):
+        src = img.get('src', '')
+        if not src.startswith('http'):
+            continue
+        try:
+            referer = WECHAT_REFERER if 'mmbiz' in src else None
+            fname, raw = download_to_bytes(src, referer=referer)
+            mime = _guess_mime(fname)
+            b64 = base64.b64encode(raw).decode('ascii')
+            img['src'] = f'data:{mime};base64,{b64}'
+        except Exception as e:
+            logger.warning(f"图片内联失败，保留原链接 {src}: {e}")
+
     return str(soup)
 
 
-# Markdown 图片语法：![alt](url)。微信图片 URL 不含 ')' 与空白，匹配安全。
-IMG_MD_RE = re.compile(r'!\[[^\]]*\]\((https?://[^)\s]+)\)')
-
-
-def _localize_images(markdown: str) -> tuple[str, Dict[str, str]]:
-    """从 markdown 正文提取所有图片 URL，下载为 base64，
-    并把 ![alt](url) 替换为 Obsidian 内部链接 ![[文件名]]。
-
-    直接以正文里实际出现的 URL 为准，不依赖抓取器的 images 列表
-    （markdownify 后图片 URL 来自 <img src>，与 data-src 可能不一致）。
-
-    返回 (新 markdown, {文件名: base64})。
-    """
-    images_b64: Dict[str, str] = {}
-    url_to_fname: Dict[str, str] = {}
-
-    for m in IMG_MD_RE.finditer(markdown):
-        url = m.group(1)
-        if url in url_to_fname:
-            continue
-        try:
-            referer = WECHAT_REFERER if 'mmbiz.qpic.cn' in url else None
-            fname, raw = download_to_bytes(url, referer=referer)
-            base_fname = fname
-            i = 1
-            while fname in images_b64:
-                stem, _, ext = base_fname.rpartition('.')
-                fname = f"{stem}_{i}.{ext}" if ext else f"{base_fname}_{i}"
-                i += 1
-            images_b64[fname] = base64.b64encode(raw).decode('ascii')
-            url_to_fname[url] = fname
-        except Exception as e:
-            logger.warning(f"图片下载失败，跳过 {url}: {e}")
-
-    def _sub(m: "re.Match[str]") -> str:
-        fname = url_to_fname.get(m.group(1))
-        return f'![[{fname}]]' if fname else m.group(0)
-
-    return IMG_MD_RE.sub(_sub, markdown), images_b64
+def _html_to_text(html: str) -> str:
+    """从 HTML 提取纯文本，供 AI 分类（节省 token、避免标签干扰）。"""
+    soup = BeautifulSoup(html, 'html.parser')
+    return soup.get_text(separator='\n', strip=True)
 
 
 async def _handle_article(article_id: str, source_url: str) -> Dict[str, Any]:
@@ -92,21 +91,20 @@ async def _handle_article(article_id: str, source_url: str) -> Dict[str, Any]:
     scraper = PlaywrightScraper(headless=True)
     article = await scraper.scrape(source_url)
 
-    # 优先使用 HTML 抓取并转 Markdown（保留代码块、引用、加粗等格式）
-    raw_md = (
-        html_to_md(_delazy_html(article.content_html), heading_style='ATX', bullets='-')
-        if getattr(article, 'content_html', None)
-        else article.content
-    )
-    content, images_b64 = _localize_images(raw_md)
+    if getattr(article, 'content_html', None):
+        html = _clean_html(article.content_html)
+        text = _html_to_text(html)
+    else:
+        html = f"<p>{article.content}</p>"
+        text = article.content
 
     return {
         "article_id": article_id,
         "status": "success",
         "title": article.title,
         "author": getattr(article, "author", None),
-        "content_md": content,
-        "article_images": images_b64,
+        "content_md": html,
+        "content_text": text[:4000],
     }
 
 
@@ -129,13 +127,14 @@ async def _handle_youtube(article_id: str, source_url: str) -> Dict[str, Any]:
         f"[{int(it['start'])//60:02d}:{int(it['start'])%60:02d}] {it['text']}"
         for it in items
     )
+    content = f"## 视频转录\n\n{body}"
 
     return {
         "article_id": article_id,
         "status": "success",
         "title": f"YouTube · {video_id}",
-        "content_md": f"## 视频转录\n\n{body}",
-        "article_images": {},
+        "content_md": content,
+        "content_text": body[:4000],
     }
 
 

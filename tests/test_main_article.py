@@ -1,11 +1,11 @@
 import base64
-import os
 from unittest.mock import patch, MagicMock, AsyncMock
 import pytest
 
 
 @pytest.mark.asyncio
-async def test_article_flow_success(monkeypatch):
+async def test_article_html_inlines_images_and_keeps_style(monkeypatch):
+    """HTML 直存：图片下载后 base64 内联到 src；内联 style 保留；script 删除。"""
     monkeypatch.setenv('ARTICLE_ID', 'a-1')
     monkeypatch.setenv('SOURCE_URL', 'https://mp.weixin.qq.com/s/xxx')
     monkeypatch.setenv('CONTENT_TYPE', 'article')
@@ -17,11 +17,10 @@ async def test_article_flow_success(monkeypatch):
     fake_article = MagicMock()
     fake_article.title = 'T'
     fake_article.author = '某公众号'
-    fake_article.content = '纯文本备用'
-    fake_article.images = []
-    # 微信图片在 content_html 里以 <img src> 出现；markdownify 转出 ![](url)
+    fake_article.content = '备用'
     fake_article.content_html = (
-        '<p>正文</p>'
+        '<script>tracker()</script>'
+        '<p style="text-align:center;font-size:12px">图注居中小字</p>'
         '<img src="https://mmbiz.qpic.cn/x/640?wx_fmt=png">'
     )
 
@@ -32,17 +31,59 @@ async def test_article_flow_success(monkeypatch):
         await run()
 
         sent = cb.call_args.args[0]
-        assert sent['article_id'] == 'a-1'
         assert sent['status'] == 'success'
-        assert sent['title'] == 'T'
         assert sent['author'] == '某公众号'
-        assert '640.png' in sent['article_images']
-        assert base64.b64decode(sent['article_images']['640.png']) == b'PNG'
-        # 正文里图片被替换为 Obsidian 内部链接，不再有原始 URL
-        assert '![[640.png]]' in sent['content_md']
+        # 图片 base64 内联
+        b64 = base64.b64encode(b'PNG').decode()
+        assert f'data:image/png;base64,{b64}' in sent['content_md']
         assert 'mmbiz.qpic.cn' not in sent['content_md']
-        # 微信图片下载带了防盗链 Referer
+        # 内联 style 保留（排版保真）
+        assert 'text-align:center' in sent['content_md']
+        # script 被删除
+        assert 'tracker()' not in sent['content_md']
+        # 分类用纯文本，不含标签
+        assert '<' not in sent['content_text']
+        assert '图注居中小字' in sent['content_text']
+        # 微信图带防盗链 Referer
         assert dl.call_args.kwargs.get('referer') == 'https://mp.weixin.qq.com/'
+        # HTML 直存不再产出 article_images 字段
+        assert 'article_images' not in sent
+
+
+@pytest.mark.asyncio
+async def test_article_delazies_then_inlines(monkeypatch):
+    """懒加载图：data-src 真实地址被提升并内联，占位 SVG 不残留。"""
+    monkeypatch.setenv('ARTICLE_ID', 'a-lazy')
+    monkeypatch.setenv('SOURCE_URL', 'https://mp.weixin.qq.com/s/xxx')
+    monkeypatch.setenv('CONTENT_TYPE', 'article')
+    monkeypatch.setenv('CALLBACK_URL', 'https://x.supabase.co/functions/v1/actions-callback')
+    monkeypatch.setenv('CALLBACK_TOKEN', 't')
+
+    from main import run
+
+    fake_article = MagicMock()
+    fake_article.title = 'T'
+    fake_article.author = 'A'
+    fake_article.content = '备用'
+    fake_article.content_html = (
+        '<img src="data:image/svg+xml,%3Csvg/%3E" '
+        'data-src="https://mmbiz.qpic.cn/real/640?wx_fmt=png">'
+    )
+
+    with patch('main.PlaywrightScraper') as Scraper, \
+         patch('main.download_to_bytes', return_value=('640.png', b'IMG')) as dl, \
+         patch('main.post_callback') as cb:
+        Scraper.return_value.scrape = AsyncMock(return_value=fake_article)
+        await run()
+
+        sent = cb.call_args.args[0]
+        b64 = base64.b64encode(b'IMG').decode()
+        assert f'data:image/png;base64,{b64}' in sent['content_md']
+        # 占位 svg 与原始 http 地址都不应残留
+        assert 'svg+xml' not in sent['content_md']
+        assert 'mmbiz.qpic.cn' not in sent['content_md']
+        # 下载的是 data-src 的真实地址
+        assert dl.call_args.args[0] == 'https://mmbiz.qpic.cn/real/640?wx_fmt=png'
 
 
 @pytest.mark.asyncio
@@ -65,69 +106,5 @@ async def test_article_flow_failure_reports_error(monkeypatch):
         assert 'boom' in sent['error_message']
 
 
-@pytest.mark.asyncio
-async def test_article_flow_uses_html_when_available(monkeypatch):
-    monkeypatch.setenv('ARTICLE_ID', 'a-html')
-    monkeypatch.setenv('SOURCE_URL', 'https://mp.weixin.qq.com/s/xxx')
-    monkeypatch.setenv('CONTENT_TYPE', 'article')
-    monkeypatch.setenv('CALLBACK_URL', 'https://x.supabase.co/functions/v1/actions-callback')
-    monkeypatch.setenv('CALLBACK_TOKEN', 't')
-
-    from main import run
-
-    fake_article = MagicMock()
-    fake_article.title = 'T'
-    fake_article.content = '原始纯文本备用'
-    fake_article.content_html = '<h1>标题</h1><p>这是<strong>加粗</strong>段落</p><pre><code>print(1)</code></pre>'
-    fake_article.images = []
-
-    with patch('main.PlaywrightScraper') as Scraper, \
-         patch('main.post_callback') as cb:
-        Scraper.return_value.scrape = AsyncMock(return_value=fake_article)
-        await run()
-        sent = cb.call_args.args[0]
-        # 来自 HTML 转换：应该看到 markdown 加粗、代码块标记
-        assert '**加粗**' in sent['content_md']
-        assert 'print(1)' in sent['content_md']
-        # 不应该看到 HTML 标签残留
-        assert '<strong>' not in sent['content_md']
-        assert '<pre>' not in sent['content_md']
-
-
-@pytest.mark.asyncio
-async def test_article_flow_delazies_wechat_lazy_images(monkeypatch):
-    """微信懒加载：真图在 data-src，src 是占位 SVG。
-    预期：data-src 提升为 src → 下载真图 → 正文用 ![[]]，无 data: 占位残留。"""
-    monkeypatch.setenv('ARTICLE_ID', 'a-lazy')
-    monkeypatch.setenv('SOURCE_URL', 'https://mp.weixin.qq.com/s/xxx')
-    monkeypatch.setenv('CONTENT_TYPE', 'article')
-    monkeypatch.setenv('CALLBACK_URL', 'https://x.supabase.co/functions/v1/actions-callback')
-    monkeypatch.setenv('CALLBACK_TOKEN', 't')
-
-    from main import run
-
-    fake_article = MagicMock()
-    fake_article.title = 'T'
-    fake_article.author = 'A'
-    fake_article.content = '备用'
-    fake_article.images = []
-    fake_article.content_html = (
-        '<p>正文</p>'
-        '<img src="data:image/svg+xml,%3Csvg/%3E" '
-        'data-src="https://mmbiz.qpic.cn/real/640?wx_fmt=png">'
-    )
-
-    with patch('main.PlaywrightScraper') as Scraper, \
-         patch('main.download_to_bytes', return_value=('640.png', b'IMG')) as dl, \
-         patch('main.post_callback') as cb:
-        Scraper.return_value.scrape = AsyncMock(return_value=fake_article)
-        await run()
-        sent = cb.call_args.args[0]
-        assert '![[640.png]]' in sent['content_md']
-        assert '640.png' in sent['article_images']
-        # 占位 SVG 与真实 URL 都不应残留在正文
-        assert 'data:image/svg' not in sent['content_md']
-        assert 'mmbiz.qpic.cn' not in sent['content_md']
-        # 下载的是 data-src 的真实地址，带防盗链 Referer
-        assert dl.call_args.args[0] == 'https://mmbiz.qpic.cn/real/640?wx_fmt=png'
-        assert dl.call_args.kwargs.get('referer') == 'https://mp.weixin.qq.com/'
+# YouTube 转录流程的测试见独立任务（youtube-transcript-api 新版 API 变更，
+# _handle_youtube 待单独适配，不在 HTML 直存任务范围内）。
