@@ -74,6 +74,7 @@ async def _handle_article(article_id: str, source_url: str) -> Dict[str, Any]:
         "article_id": article_id,
         "status": "success",
         "title": article.title,
+        "author": getattr(article, "author", None),
         "content_md": content,
         "article_images": images_b64,
     }

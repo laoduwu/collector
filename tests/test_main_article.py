@@ -16,6 +16,7 @@ async def test_article_flow_success(monkeypatch):
 
     fake_article = MagicMock()
     fake_article.title = 'T'
+    fake_article.author = '某公众号'
     fake_article.content = '正文 https://mmbiz.qpic.cn/x.jpg 后续'
     fake_article.images = ['https://mmbiz.qpic.cn/x.jpg']
     fake_article.content_html = None
@@ -30,6 +31,7 @@ async def test_article_flow_success(monkeypatch):
         assert sent['article_id'] == 'a-1'
         assert sent['status'] == 'success'
         assert sent['title'] == 'T'
+        assert sent['author'] == '某公众号'
         assert 'x.jpg' in sent['article_images']
         assert base64.b64decode(sent['article_images']['x.jpg']) == b'PNG'
         assert '![[x.jpg]]' in sent['content_md']
