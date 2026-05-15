@@ -6,6 +6,8 @@ import re
 import traceback
 from typing import Any, Dict
 
+from bs4 import BeautifulSoup
+
 from utils.logger import logger
 from utils.callback import post_callback
 from scrapers.image_downloader import download_to_bytes
@@ -21,6 +23,24 @@ else:
 
 
 WECHAT_REFERER = "https://mp.weixin.qq.com/"
+
+
+# 微信公众号图片懒加载：真实地址在 data-src，src 是 1x1 占位 SVG。
+# markdownify 之前必须把 data-src 提升为 src，否则正文只剩占位图。
+_LAZY_ATTRS = ('data-src', 'data-original', 'data-actualsrc', 'data-backsrc')
+
+
+def _delazy_html(html: str) -> str:
+    """把 <img> 懒加载真实地址提升为 src，清掉懒加载占位属性。"""
+    soup = BeautifulSoup(html, 'html.parser')
+    for img in soup.find_all('img'):
+        real = next((img.get(a) for a in _LAZY_ATTRS if img.get(a)), None)
+        if real:
+            img['src'] = real
+        for a in _LAZY_ATTRS:
+            if img.has_attr(a):
+                del img[a]
+    return str(soup)
 
 
 # Markdown 图片语法：![alt](url)。微信图片 URL 不含 ')' 与空白，匹配安全。
@@ -74,7 +94,7 @@ async def _handle_article(article_id: str, source_url: str) -> Dict[str, Any]:
 
     # 优先使用 HTML 抓取并转 Markdown（保留代码块、引用、加粗等格式）
     raw_md = (
-        html_to_md(article.content_html, heading_style='ATX', bullets='-')
+        html_to_md(_delazy_html(article.content_html), heading_style='ATX', bullets='-')
         if getattr(article, 'content_html', None)
         else article.content
     )
