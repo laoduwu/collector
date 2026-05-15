@@ -56,7 +56,7 @@ jobs:
           SOURCE_URL:    ${{ github.event.client_payload.source_url || inputs.source_url }}
           CONTENT_TYPE:  ${{ github.event.client_payload.content_type || inputs.content_type }}
           CALLBACK_URL:  ${{ github.event.client_payload.callback_url || inputs.callback_url }}
-          CALLBACK_TOKEN: ${{ secrets.SUPABASE_CALLBACK_TOKEN }}
+          CALLBACK_TOKEN: ${{ secrets.ROCBASE_CALLBACK_TOKEN }}
           LOG_LEVEL: INFO
           PYTHONPATH: ${{ github.workspace }}/src
         run: |
