@@ -142,7 +142,13 @@ def _whisper_file(client: Any, audio_path: str) -> Tuple[List[Dict], str]:
             response_format='verbose_json',
             timestamp_granularities=['segment'],
         )
-    segs = [{'start': float(s.start), 'text': s.text.strip()} for s in result.segments]
+    segs = [
+        {
+            'start': float(s['start'] if isinstance(s, dict) else s.start),
+            'text': (s['text'] if isinstance(s, dict) else s.text).strip(),
+        }
+        for s in result.segments
+    ]
     lang = getattr(result, 'language', None) or 'zh'
     return segs, lang
 
