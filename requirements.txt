@@ -8,8 +8,12 @@ lxml_html_clean>=0.4.0
 # HTTP
 requests>=2.31.0
 
-# YouTube transcript
+# YouTube transcript (legacy fallback)
 youtube-transcript-api>=0.6.2
+
+# Video processing
+yt-dlp>=2024.1.1
+groq>=0.4.0
 
 
 # Utilities

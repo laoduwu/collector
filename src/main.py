@@ -148,8 +148,9 @@ async def run() -> None:
     try:
         if content_type == "article":
             payload = await _handle_article(article_id, source_url)
-        elif content_type == "youtube":
-            payload = await _handle_youtube(article_id, source_url)
+        elif content_type in ("youtube", "bilibili"):
+            from video_processor import handle_video
+            payload = await handle_video(article_id, source_url, content_type)
         else:
             raise ValueError(f"不支持的 content_type: {content_type}")
     except Exception as e:
