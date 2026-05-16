@@ -226,8 +226,10 @@ def _segment_paragraphs(segments: List[Dict]) -> List[Dict]:
 
 
 def _call_gemini_json(prompt: str, timeout: int = 60) -> Any:
-    """调用 Gemini，返回解析后的 JSON 对象"""
+    """调用 Gemini，返回解析后的 JSON 对象；429 时最多重试 2 次"""
     import urllib.request
+    import urllib.error
+    import time
     api_key = os.environ['GEMINI_API_KEY']
     url = (
         f'https://generativelanguage.googleapis.com/v1beta/models/'
@@ -238,9 +240,18 @@ def _call_gemini_json(prompt: str, timeout: int = 60) -> Any:
         'generationConfig': {'responseMimeType': 'application/json'},
     }).encode()
     req = urllib.request.Request(url, data=body, headers={'Content-Type': 'application/json'})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        result = json.loads(resp.read())
-    return json.loads(result['candidates'][0]['content']['parts'][0]['text'])
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                result = json.loads(resp.read())
+            return json.loads(result['candidates'][0]['content']['parts'][0]['text'])
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt < 2:
+                wait = 10 * (attempt + 1)
+                logger.warning(f'Gemini 429，{wait}s 后重试（第 {attempt + 1} 次）')
+                time.sleep(wait)
+            else:
+                raise
 
 
 def _call_minimax_json(prompt: str, timeout: int = 60) -> Any:
@@ -260,18 +271,50 @@ def _call_minimax_json(prompt: str, timeout: int = 60) -> Any:
     })
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         result = json.loads(resp.read())
-    return json.loads(result['choices'][0]['message']['content'])
+    content = result['choices'][0]['message']['content']
+    if not content or not content.strip():
+        raise ValueError('MiniMax 返回空内容')
+    return json.loads(content)
+
+
+def _call_groq_json(prompt: str, timeout: int = 60) -> Any:
+    """调用 Groq（OpenAI 兼容），返回解析后的 JSON 对象"""
+    import urllib.request
+    api_key = os.environ['GROQ_API_KEY']
+    url = 'https://api.groq.com/openai/v1/chat/completions'
+    body = json.dumps({
+        'model': 'llama-3.3-70b-versatile',
+        'messages': [{'role': 'user', 'content': prompt}],
+        'temperature': 0.3,
+        'response_format': {'type': 'json_object'},
+    }).encode()
+    req = urllib.request.Request(url, data=body, headers={
+        'Content-Type': 'application/json',
+        'Authorization': f'Bearer {api_key}',
+    })
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        result = json.loads(resp.read())
+    content = result['choices'][0]['message']['content']
+    if not content or not content.strip():
+        raise ValueError('Groq 返回空内容')
+    return json.loads(content)
 
 
 def _llm_json(prompt: str, timeout: int = 60) -> Any:
-    """依次尝试 Gemini → MiniMax，返回第一个成功的 JSON 结果"""
+    """依次尝试 Gemini → Groq → MiniMax，返回第一个成功的 JSON 结果"""
     errors = []
     if os.environ.get('GEMINI_API_KEY'):
         try:
             return _call_gemini_json(prompt, timeout)
         except Exception as e:
             errors.append(f'Gemini: {e}')
-            logger.warning(f'Gemini 调用失败，切换 MiniMax: {e}')
+            logger.warning(f'Gemini 调用失败，切换 Groq: {e}')
+    if os.environ.get('GROQ_API_KEY'):
+        try:
+            return _call_groq_json(prompt, timeout)
+        except Exception as e:
+            errors.append(f'Groq: {e}')
+            logger.warning(f'Groq 调用失败，切换 MiniMax: {e}')
     if os.environ.get('MINIMAX_API_KEY'):
         try:
             return _call_minimax_json(prompt, timeout)
