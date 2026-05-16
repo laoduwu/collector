@@ -18,6 +18,11 @@ on:
         required: true
         default: 'article'
         type: string
+      save_video:
+        description: 'Download and save original video (true/false)'
+        required: false
+        default: 'false'
+        type: string
       callback_url:
         description: 'Supabase actions-callback URL'
         required: true
@@ -66,6 +71,9 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
           LOG_LEVEL: INFO
+          SAVE_VIDEO:     ${{ github.event.client_payload.save_video || inputs.save_video || 'false' }}
+          SUPABASE_URL:   ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           PYTHONPATH: ${{ github.workspace }}/src
         run: |
           cd src
