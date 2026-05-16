@@ -341,24 +341,39 @@ def _translate_paragraphs(paragraphs: List[Dict]) -> List[str]:
 # 关键帧识别
 # ────────────────────────────────────────────────
 
-def _identify_keyframes(transcript_text: str) -> List[Dict]:
-    """LLM 从转录文本识别 3-7 个值得截图的语义时刻"""
+def _identify_keyframes(transcript_text: str, video_duration_sec: float = 0) -> List[Dict]:
+    """LLM 从转录文本识别值得截图的时刻；LLM 失败或返回空时均匀采样兜底"""
     prompt = (
-        'You are analyzing a video transcript. Identify 3 to 7 moments that '
-        'benefit from a screenshot because they show a diagram, chart, process flow, '
-        'UI interface, or visual comparison. For talking-head videos with no such '
-        'visual content, return an empty list.\n\n'
+        'You are analyzing a video transcript (may be in Chinese or English). '
+        'Identify 3 to 7 moments that would benefit from a screenshot. '
+        'Good candidates: diagrams, charts, code on screen, terminal output, UI demos, '
+        'side-by-side comparisons, data/results being shown, or any moment where the '
+        'speaker says "look at this", "watch here", "let\'s see", or equivalent in Chinese '
+        '(e.g. "你看", "注意看", "咱们看看", "走，看效果"). '
+        'Only return empty list for pure audio podcasts with absolutely no visual content.\n\n'
         'Return JSON: {"keyframes": [{"timestamp_seconds": <number>, "reason": "<why>"}]}\n\n'
-        'Transcript (first 8000 chars):\n' + transcript_text[:8000]
+        'Transcript:\n' + transcript_text[:12000]
     )
     try:
-        data = _llm_json(prompt, timeout=60)
+        data = _llm_json(prompt, timeout=90)
         kfs = data.get('keyframes', [])
         logger.info(f'关键帧识别：{len(kfs)} 个时刻')
-        return kfs
+        if kfs:
+            return kfs
     except Exception as e:
         logger.warning(f'关键帧识别失败: {e}')
-        return []
+
+    # 兜底：按时长均匀采样 3 帧（视频时长已知时）
+    if video_duration_sec > 30:
+        count = 3
+        step = video_duration_sec / (count + 1)
+        fallback = [
+            {'timestamp_seconds': round(step * (i + 1)), 'reason': 'uniform fallback'}
+            for i in range(count)
+        ]
+        logger.info(f'均匀采样兜底：{len(fallback)} 帧（时长 {video_duration_sec:.0f}s）')
+        return fallback
+    return []
 
 
 # ────────────────────────────────────────────────
@@ -572,7 +587,8 @@ async def handle_video(
 
         # 6. 关键帧识别
         full_text = ' '.join(s['text'] for s in segments)
-        keyframes = _identify_keyframes(full_text)
+        video_duration_sec = segments[-1]['start'] if segments else 0
+        keyframes = _identify_keyframes(full_text, video_duration_sec)
 
         # 7. 视频下载 + 帧提取 + Vision 选帧
         article_images: Dict[str, str] = {}
