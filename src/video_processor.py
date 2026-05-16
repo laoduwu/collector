@@ -377,6 +377,106 @@ def _identify_keyframes(transcript_text: str, video_duration_sec: float = 0) -> 
 
 
 # ────────────────────────────────────────────────
+# 微信视频号下载（三级降级）
+# ────────────────────────────────────────────────
+
+async def _intercept_wechat_video_url(page_url: str) -> str:
+    """Playwright 打开页面，拦截视频 CDN URL"""
+    from playwright.async_api import async_playwright
+    video_url: Optional[str] = None
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        ctx = await browser.new_context(
+            user_agent=(
+                'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) '
+                'AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148'
+            )
+        )
+
+        async def on_request(request):
+            nonlocal video_url
+            url = request.url
+            if video_url:
+                return
+            if ('.mp4' in url or 'video' in url.lower()) and (
+                'cdn' in url or 'qpic' in url or 'wx' in url or 'mmstat' not in url
+            ):
+                video_url = url
+
+        page = await ctx.new_page()
+        page.on('request', on_request)
+        try:
+            await page.goto(page_url, wait_until='networkidle', timeout=30000)
+            await asyncio.sleep(3)
+        finally:
+            await browser.close()
+
+    if not video_url:
+        raise RuntimeError('Playwright 未拦截到视频 CDN URL')
+    return video_url
+
+
+async def _download_wechat_video(url: str, tmpdir: str) -> str:
+    """
+    微信视频号视频下载，三级降级：
+    1. yt-dlp 直接下载
+    2. Playwright 拦截 CDN URL 后 yt-dlp 下载
+    3. 报错
+    返回下载后视频文件路径。
+    """
+    out_path = os.path.join(tmpdir, 'wechat_source.mp4')
+
+    # Level 1: yt-dlp 直接
+    try:
+        cmd = [
+            'yt-dlp',
+            '--format', 'best[ext=mp4]/best',
+            '--merge-output-format', 'mp4',
+            '--output', out_path,
+            '--no-warnings', '--quiet',
+            url,
+        ]
+        subprocess.run(cmd, check=True, capture_output=True, timeout=180)
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            logger.info(f'yt-dlp 下载视频号成功: {os.path.getsize(out_path) // 1024}KB')
+            return out_path
+    except Exception as e:
+        logger.warning(f'yt-dlp 下载视频号失败，尝试 Playwright: {e}')
+
+    # Level 2: Playwright 拦截
+    try:
+        cdn_url = await _intercept_wechat_video_url(url)
+        cmd = [
+            'yt-dlp', '--output', out_path,
+            '--no-warnings', '--quiet', cdn_url,
+        ]
+        subprocess.run(cmd, check=True, capture_output=True, timeout=300)
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            logger.info(f'Playwright 拦截下载成功: {os.path.getsize(out_path) // 1024}KB')
+            return out_path
+    except Exception as e:
+        logger.warning(f'Playwright 拦截下载失败: {e}')
+
+    raise RuntimeError(
+        '微信视频号视频下载失败（yt-dlp 和 Playwright 均无法获取），'
+        '该视频可能需要登录才能访问'
+    )
+
+
+def _extract_audio_from_video(video_path: str, tmpdir: str) -> str:
+    """从视频文件提取音频（mp3），供 Whisper 转录"""
+    audio_path = os.path.join(tmpdir, 'audio.mp3')
+    subprocess.run([
+        'ffmpeg', '-i', video_path,
+        '-vn', '-ar', '16000', '-ac', '1', '-b:a', '64k',
+        '-y', audio_path,
+    ], check=True, capture_output=True, timeout=300)
+    logger.info(f'音频提取完成: {os.path.getsize(audio_path) // 1024}KB')
+    return audio_path
+
+
+# ────────────────────────────────────────────────
 # 视频下载 + 帧提取 + Vision 选帧
 # ────────────────────────────────────────────────
 
@@ -537,6 +637,85 @@ def _build_content_md(
 
 
 # ────────────────────────────────────────────────
+# 视频压缩 + Storage 上传
+# ────────────────────────────────────────────────
+
+def _upload_to_storage(video_path: str, article_id: str) -> str:
+    """上传视频到 Supabase Storage，返回 storage_path"""
+    import urllib.request
+    supabase_url = os.environ['SUPABASE_URL']
+    service_key = os.environ['SUPABASE_SERVICE_ROLE_KEY']
+    storage_path = f'videos/{article_id}.mp4'
+    upload_url = f'{supabase_url}/storage/v1/object/media-temp/{storage_path}'
+
+    file_size = os.path.getsize(video_path)
+    logger.info(f'上传视频到 Storage: {file_size // (1024*1024)}MB → {storage_path}')
+
+    with open(video_path, 'rb') as f:
+        video_bytes = f.read()
+
+    req = urllib.request.Request(
+        upload_url,
+        data=video_bytes,
+        headers={
+            'Authorization': f'Bearer {service_key}',
+            'Content-Type': 'video/mp4',
+            'x-upsert': 'true',
+        },
+        method='POST',
+    )
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        resp.read()
+    logger.info(f'Storage 上传完成: {storage_path}')
+    return storage_path
+
+
+def _compress_and_upload_video(source_video: str, article_id: str, tmpdir: str) -> str:
+    """
+    压缩视频至 ≤50MB，上传 Supabase Storage，返回 storage_path。
+    若压缩后仍超限则截取前 N 秒直到达标。
+    """
+    # 获取时长
+    result = subprocess.run(
+        ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', source_video],
+        capture_output=True, text=True, timeout=30, check=True,
+    )
+    duration_sec = float(json.loads(result.stdout)['format']['duration'])
+
+    MAX_MB = 50
+    # 目标总码率（视频 + 音频 64kbps），上限 1500kbps
+    target_kbps = min(int(MAX_MB * 8 * 1024 / max(duration_sec, 1)) - 64, 1500)
+    target_kbps = max(target_kbps, 100)  # 最低 100kbps，保证可用
+
+    compressed_path = os.path.join(tmpdir, 'compressed.mp4')
+    subprocess.run([
+        'ffmpeg', '-i', source_video,
+        '-b:v', f'{target_kbps}k',
+        '-b:a', '64k',
+        '-vf', 'scale=-2:min(480\\,ih)',
+        '-movflags', '+faststart',
+        '-y', compressed_path,
+    ], check=True, capture_output=True, timeout=600)
+
+    actual_mb = os.path.getsize(compressed_path) / (1024 * 1024)
+    logger.info(f'压缩完成: {actual_mb:.1f}MB（{target_kbps}kbps，时长 {duration_sec:.0f}s）')
+
+    # 兜底：仍超 50MB → 截取可容纳的秒数
+    if actual_mb > MAX_MB:
+        safe_sec = int(MAX_MB * 8 * 1024 / (target_kbps + 64))
+        logger.warning(f'压缩后仍超限，截取前 {safe_sec}s')
+        trimmed_path = os.path.join(tmpdir, 'trimmed.mp4')
+        subprocess.run([
+            'ffmpeg', '-i', compressed_path,
+            '-t', str(safe_sec),
+            '-c', 'copy', '-y', trimmed_path,
+        ], check=True, capture_output=True, timeout=120)
+        compressed_path = trimmed_path
+
+    return _upload_to_storage(compressed_path, article_id)
+
+
+# ────────────────────────────────────────────────
 # 主入口
 # ────────────────────────────────────────────────
 
@@ -544,11 +723,13 @@ async def handle_video(
     article_id: str, source_url: str, content_type: str
 ) -> Dict[str, Any]:
     """
-    视频处理全链路。返回 actions-callback 所需的 payload dict。
-    content_type: 'youtube' | 'bilibili'
+    视频处理全链路。
+    content_type: 'youtube' | 'bilibili' | 'wechat_video'
     """
     import tempfile
     is_bilibili = content_type == 'bilibili'
+    is_wechat = content_type == 'wechat_video'
+    save_video = os.environ.get('SAVE_VIDEO', '').lower() in ('true', '1', 'yes')
     tmpdir = tempfile.mkdtemp(prefix='rocvideo_')
     cookies_file: Optional[str] = None
 
@@ -558,13 +739,22 @@ async def handle_video(
             cookies_file = os.path.join(tmpdir, 'cookies.txt')
             await _get_bilibili_cookies(source_url, cookies_file)
 
-        # 2. 字幕提取
-        segments, lang = _extract_subtitles(source_url, tmpdir, cookies_file, is_bilibili)
+        # 2. 字幕提取（视频号无官方字幕，直接跳过）
+        segments: List[Dict] = []
+        lang: Optional[str] = None
+        if not is_wechat:
+            segments, lang = _extract_subtitles(source_url, tmpdir, cookies_file, is_bilibili)
 
-        # 3. 无字幕 → 下载音频 + Whisper
+        # 3. 无字幕时的转录路径
+        wechat_video_path: Optional[str] = None
         if not segments:
             logger.info('无可用字幕，启动 Whisper 转录')
-            audio_path = _download_audio(source_url, tmpdir, cookies_file)
+            if is_wechat:
+                # 视频号：先下载视频，再提取音频
+                wechat_video_path = await _download_wechat_video(source_url, tmpdir)
+                audio_path = _extract_audio_from_video(wechat_video_path, tmpdir)
+            else:
+                audio_path = _download_audio(source_url, tmpdir, cookies_file)
             segments, lang = _transcribe_audio(audio_path)
 
         if not segments:
@@ -593,55 +783,67 @@ async def handle_video(
         # 7. 视频下载 + 帧提取 + Vision 选帧
         article_images: Dict[str, str] = {}
         keyframe_para_map: Dict[int, str] = {}
+        downloaded_video_path: Optional[str] = wechat_video_path  # 视频号已下载则复用
 
         if keyframes:
-            logger.info(f'开始视频下载，提取 {len(keyframes)} 个关键帧')
+            logger.info(f'开始提取 {len(keyframes)} 个关键帧')
             try:
-                video_path = _download_video(source_url, tmpdir, cookies_file)
+                if downloaded_video_path is None:
+                    downloaded_video_path = _download_video(source_url, tmpdir, cookies_file)
                 for kf_idx, kf in enumerate(keyframes):
                     t = float(kf['timestamp_seconds'])
                     try:
-                        candidate_frames = _extract_candidate_frames(video_path, t, tmpdir, kf_idx)
+                        candidate_frames = _extract_candidate_frames(
+                            downloaded_video_path, t, tmpdir, kf_idx
+                        )
                         if not candidate_frames:
                             continue
-
-                        # 找最近的段落片段作为 Vision 提示
-                        nearest_para = min(
-                            paragraphs, key=lambda p: abs(p['start'] - t)
-                        )
+                        nearest_para = min(paragraphs, key=lambda p: abs(p['start'] - t))
                         snippet = ' '.join(nearest_para['texts'])[:200]
-
                         best_frame = _select_best_frame(candidate_frames, snippet)
                         if not best_frame:
                             continue
-
-                        frame_name = f'frame_{int(t)}s.jpg'  # article_images key（不含 article_id）
+                        frame_name = f'frame_{int(t)}s.jpg'
                         article_images[frame_name] = base64.b64encode(
                             Path(best_frame).read_bytes()
                         ).decode()
-
-                        # 确定插入的段落位置（最近段落的索引）
                         para_idx = min(
                             range(len(paragraphs)),
                             key=lambda i: abs(paragraphs[i]['start'] - t),
                         )
                         keyframe_para_map[para_idx] = frame_name
-
                     except Exception as e:
                         logger.warning(f'关键帧 {kf_idx} 处理失败（跳过）: {e}')
-
             except Exception as e:
-                logger.warning(f'视频下载失败，跳过全部关键帧: {e}')
+                logger.warning(f'视频下载/帧提取失败，跳过关键帧: {e}')
 
         # 8. 拼装 content_md
         content_md = _build_content_md(
             paragraphs, lang, translations, keyframe_para_map, article_id
         )
 
-        platform = 'B站' if is_bilibili else 'YouTube'
+        # 9. 保存原始视频（可选）
+        video_storage_path: Optional[str] = None
+        if save_video:
+            try:
+                source_for_save = downloaded_video_path
+                if source_for_save is None:
+                    # keyframes 未触发下载，单独为 save_video 下载
+                    if is_wechat:
+                        source_for_save = await _download_wechat_video(source_url, tmpdir)
+                    else:
+                        source_for_save = _download_video(source_url, tmpdir, cookies_file)
+                video_storage_path = _compress_and_upload_video(
+                    source_for_save, article_id, tmpdir
+                )
+                logger.info(f'视频保存完成: {video_storage_path}')
+            except Exception as e:
+                logger.warning(f'视频保存失败（不影响转录结果）: {e}')
+
+        platform = '视频号' if is_wechat else ('B站' if is_bilibili else 'YouTube')
         title = f'{platform} 视频转录'
 
-        return {
+        payload: Dict[str, Any] = {
             'article_id': article_id,
             'status': 'success',
             'title': title,
@@ -649,11 +851,10 @@ async def handle_video(
             'content_text': full_text[:4000],
             'article_images': article_images or None,
         }
+        if video_storage_path:
+            payload['video_storage_path'] = video_storage_path
+        return payload
 
     finally:
-        # 清理临时目录
         import shutil
-        try:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-        except Exception:
-            pass
+        shutil.rmtree(tmpdir, ignore_errors=True)
