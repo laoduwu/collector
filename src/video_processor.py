@@ -417,6 +417,22 @@ async def _intercept_wechat_video_url(page_url: str) -> str:
     return video_url
 
 
+def _is_valid_video(path: str) -> bool:
+    """ffprobe 验证文件是有效视频（duration > 0）"""
+    try:
+        result = subprocess.run(
+            ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+             '-of', 'json', path],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            return False
+        duration = float(json.loads(result.stdout).get('format', {}).get('duration', 0))
+        return duration > 0
+    except Exception:
+        return False
+
+
 async def _download_wechat_video(url: str, tmpdir: str) -> str:
     """
     微信视频号视频下载，三级降级：
@@ -438,9 +454,11 @@ async def _download_wechat_video(url: str, tmpdir: str) -> str:
             url,
         ]
         subprocess.run(cmd, check=True, capture_output=True, timeout=180)
-        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+        if os.path.exists(out_path) and _is_valid_video(out_path):
             logger.info(f'yt-dlp 下载视频号成功: {os.path.getsize(out_path) // 1024}KB')
             return out_path
+        else:
+            logger.warning('yt-dlp 下载内容无效（非视频或文件损坏），尝试 Playwright')
     except Exception as e:
         logger.warning(f'yt-dlp 下载视频号失败，尝试 Playwright: {e}')
 
@@ -452,9 +470,11 @@ async def _download_wechat_video(url: str, tmpdir: str) -> str:
             '--no-warnings', '--quiet', cdn_url,
         ]
         subprocess.run(cmd, check=True, capture_output=True, timeout=300)
-        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+        if os.path.exists(out_path) and _is_valid_video(out_path):
             logger.info(f'Playwright 拦截下载成功: {os.path.getsize(out_path) // 1024}KB')
             return out_path
+        else:
+            logger.warning('Playwright 拦截下载内容无效')
     except Exception as e:
         logger.warning(f'Playwright 拦截下载失败: {e}')
 
