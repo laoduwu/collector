@@ -380,40 +380,95 @@ def _identify_keyframes(transcript_text: str, video_duration_sec: float = 0) -> 
 # 微信视频号下载（三级降级）
 # ────────────────────────────────────────────────
 
+def _sph_to_preview_url(url: str) -> str:
+    """将 weixin.qq.com/sph/XXX 短链转为 channels.weixin.qq.com/finder-preview 预览 URL"""
+    import re
+    m = re.search(r'/sph/([A-Za-z0-9]+)', url)
+    if m:
+        return f'https://channels.weixin.qq.com/finder-preview/pages/sph?id={m.group(1)}'
+    return url
+
+
 async def _intercept_wechat_video_url(page_url: str) -> str:
-    """Playwright 打开页面，拦截视频 CDN URL"""
+    """Playwright 打开视频号 finder-preview 页，拦截 finder.video.qq.com CDN URL"""
     from playwright.async_api import async_playwright
     video_url: Optional[str] = None
+
+    # 短链转预览页，避免 iPhone UA 重定向到 WeChat App
+    preview_url = _sph_to_preview_url(page_url)
+    logger.info(f'Playwright 加载预览页: {preview_url}')
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         ctx = await browser.new_context(
             user_agent=(
-                'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) '
-                'AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148'
-            )
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) '
+                'Chrome/124.0.0.0 Safari/537.36'
+            ),
+            viewport={'width': 1280, 'height': 800},
         )
+
+        def _is_video_cdn(u: str) -> bool:
+            """判断是否为视频号 CDN 视频 URL"""
+            cdn_hosts = (
+                'finder.video.qq.com',
+                'finderoutside.video.qq.com',
+                'wxapp.tc.qq.com',
+                'vod2.myqcloud.com',
+            )
+            return any(h in u for h in cdn_hosts) and (
+                '.mp4' in u or 'stodownload' in u or 'encfilekey' in u
+            )
 
         async def on_request(request):
             nonlocal video_url
-            url = request.url
             if video_url:
                 return
-            if ('.mp4' in url or 'video' in url.lower()) and (
-                'cdn' in url or 'qpic' in url or 'wx' in url or 'mmstat' not in url
-            ):
-                video_url = url
+            u = request.url
+            if _is_video_cdn(u):
+                logger.info(f'拦截到视频 CDN URL: {u[:80]}...')
+                video_url = u
+
+        async def on_response(response):
+            nonlocal video_url
+            if video_url:
+                return
+            u = response.url
+            ct = response.headers.get('content-type', '')
+            if 'video' in ct and _is_video_cdn(u):
+                logger.info(f'Response 拦截到视频: {u[:80]}...')
+                video_url = u
 
         page = await ctx.new_page()
         page.on('request', on_request)
+        page.on('response', on_response)
         try:
-            await page.goto(page_url, wait_until='networkidle', timeout=30000)
-            await asyncio.sleep(3)
+            await page.goto(preview_url, wait_until='domcontentloaded', timeout=30000)
+            # 等待视频播放器元素出现
+            try:
+                await page.wait_for_selector('video, .video-player, [class*="player"]', timeout=10000)
+            except Exception:
+                pass
+            # 尝试点击播放按钮
+            for selector in ['video', '.play-btn', '[class*="play"]', 'button']:
+                try:
+                    el = page.locator(selector).first
+                    if await el.count() > 0:
+                        await el.click(timeout=3000)
+                        break
+                except Exception:
+                    pass
+            # 等待视频 CDN 请求出现
+            for _ in range(10):
+                if video_url:
+                    break
+                await asyncio.sleep(1)
         finally:
             await browser.close()
 
     if not video_url:
-        raise RuntimeError('Playwright 未拦截到视频 CDN URL')
+        raise RuntimeError('Playwright 未拦截到视频 CDN URL（finder.video.qq.com）')
     return video_url
 
 
