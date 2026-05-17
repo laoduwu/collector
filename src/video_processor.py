@@ -682,7 +682,7 @@ def _compress_and_upload_video(source_video: str, article_id: str, tmpdir: str) 
     )
     duration_sec = float(json.loads(result.stdout)['format']['duration'])
 
-    MAX_MB = 50
+    MAX_MB = 48  # 留 2MB 余量应对容器开销，避免卡在 Storage 50MB 上限边缘
     # 目标总码率（视频 + 音频 64kbps），上限 1500kbps
     target_kbps = min(int(MAX_MB * 8 * 1024 / max(duration_sec, 1)) - 64, 1500)
     target_kbps = max(target_kbps, 100)  # 最低 100kbps，保证可用
@@ -700,10 +700,12 @@ def _compress_and_upload_video(source_video: str, article_id: str, tmpdir: str) 
     actual_mb = os.path.getsize(compressed_path) / (1024 * 1024)
     logger.info(f'压缩完成: {actual_mb:.1f}MB（{target_kbps}kbps，时长 {duration_sec:.0f}s）')
 
-    # 兜底：仍超 50MB → 截取可容纳的秒数
+    # 兜底：仍超限 → 用实际码率计算可容纳秒数（截取至 90% 安全余量）
     if actual_mb > MAX_MB:
-        safe_sec = int(MAX_MB * 8 * 1024 / (target_kbps + 64))
-        logger.warning(f'压缩后仍超限，截取前 {safe_sec}s')
+        actual_total_kbps = (os.path.getsize(compressed_path) * 8) / (duration_sec * 1000)
+        safe_sec = int(MAX_MB * 8 * 1024 * 0.90 / actual_total_kbps)
+        safe_sec = max(safe_sec, 30)  # 至少保留 30 秒
+        logger.warning(f'压缩后仍超限，截取前 {safe_sec}s（实际码率 {actual_total_kbps:.0f}kbps）')
         trimmed_path = os.path.join(tmpdir, 'trimmed.mp4')
         subprocess.run([
             'ffmpeg', '-i', compressed_path,
