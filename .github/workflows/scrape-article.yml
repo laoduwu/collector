@@ -14,7 +14,7 @@ on:
         required: true
         type: string
       content_type:
-        description: 'article | youtube | bilibili'
+        description: 'article | youtube | bilibili | document'
         required: true
         default: 'article'
         type: string
