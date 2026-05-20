@@ -124,6 +124,10 @@ padding:12px 16px;margin:12px 0;border-radius:6px;background:#f9fafb;">
 
 # ─── PDF 提取（Vision 主路径 + dict 降级） ───────────────────
 
+VISION_MAX_PAGES = 60  # 超过此页数时，仅前 N 页用 Vision，其余降级文字提取
+                        # 60 页 = 12 次 Vision API 调用，合理控制免费配额消耗
+
+
 def _extract_pdf_vision(raw: bytes) -> Tuple[str, str, str]:
     """用 Gemini Vision 将 PDF 每页转为结构化 HTML。
     返回 (body_html, plain_text, title)
@@ -133,7 +137,11 @@ def _extract_pdf_vision(raw: bytes) -> Tuple[str, str, str]:
     doc = fitz.open(stream=raw, filetype='pdf')
     title = (doc.metadata or {}).get('title', '') or ''
     total_pages = doc.page_count
-    logger.info(f'PDF Vision 提取：共 {total_pages} 页')
+    vision_pages = min(total_pages, VISION_MAX_PAGES)
+    if total_pages > VISION_MAX_PAGES:
+        logger.info(f'PDF 共 {total_pages} 页，前 {vision_pages} 页用 Vision，其余降级文字提取')
+    else:
+        logger.info(f'PDF Vision 提取：共 {total_pages} 页')
 
     BATCH_SIZE = 5   # 每次 API 调用处理的页数
     DPI = 96         # 分辨率：794×1123px（A4），平衡质量与体积
@@ -142,10 +150,13 @@ def _extract_pdf_vision(raw: bytes) -> Tuple[str, str, str]:
     plain_parts: List[str] = []
 
     pages = list(doc)
-    for batch_start in range(0, len(pages), BATCH_SIZE):
-        batch = pages[batch_start: batch_start + BATCH_SIZE]
-        end = min(batch_start + BATCH_SIZE, total_pages)
-        logger.info(f'  处理第 {batch_start + 1}–{end} 页（共 {total_pages} 页）')
+
+    # Vision 处理前 vision_pages 页
+    vision_page_list = pages[:vision_pages]
+    for batch_start in range(0, len(vision_page_list), BATCH_SIZE):
+        batch = vision_page_list[batch_start: batch_start + BATCH_SIZE]
+        end = batch_start + len(batch)
+        logger.info(f'  Vision 第 {batch_start + 1}–{end} / {total_pages} 页')
 
         images: List[Tuple[str, str]] = []
         for page in batch:
@@ -160,12 +171,21 @@ def _extract_pdf_vision(raw: bytes) -> Tuple[str, str, str]:
                 html_parts.append(chunk_html)
                 plain_parts.append(_html_to_plain(chunk_html))
         except Exception as e:
-            logger.warning(f'Vision 处理第 {batch_start + 1}–{end} 页失败，降级文字提取: {e}')
+            logger.warning(f'Vision 第 {batch_start + 1}–{end} 页失败，降级: {e}')
             for page in batch:
                 text = page.get_text().strip()
                 if text:
                     html_parts.append(f'<p>{_esc(text)}</p>')
                     plain_parts.append(text)
+
+    # 超出 VISION_MAX_PAGES 的页面用文字提取降级
+    if total_pages > vision_pages:
+        html_parts.append(f'<p><i>（以下为第 {vision_pages + 1}–{total_pages} 页，纯文字提取）</i></p>')
+        for page in pages[vision_pages:]:
+            text = page.get_text().strip()
+            if text:
+                html_parts.append(f'<p>{_esc(text)}</p>')
+                plain_parts.append(text)
 
     doc.close()
     return '\n'.join(html_parts), '\n\n'.join(plain_parts), title
