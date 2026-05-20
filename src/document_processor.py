@@ -1,6 +1,15 @@
-"""文档处理器：PDF/DOCX/PPTX/TXT/MD 提取、摘要、双语翻译、HTML 组装"""
+"""文档处理器：PDF/DOCX/PPTX/TXT/MD 提取、摘要、双语翻译、HTML 组装
+
+PDF 使用 Gemini Vision 逐批渲染页面并转换为结构化 HTML，
+可正确还原表格、标题层级、加粗、彩色框、双栏等复杂排版。
+"""
 import base64
+import json
 import os
+import time
+import urllib.request
+import urllib.error
+from html.parser import HTMLParser
 from io import BytesIO
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -16,6 +25,33 @@ def _esc(text: str) -> str:
     return text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
 
+def _html_to_plain(html: str) -> str:
+    """从 HTML 提取纯文字（供 AI 摘要/翻译）"""
+    class _Ex(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.parts: List[str] = []
+        def handle_data(self, data: str) -> None:
+            self.parts.append(data)
+    ex = _Ex()
+    ex.feed(html)
+    return ' '.join(ex.parts)
+
+
+def _strip_code_fence(text: str) -> str:
+    """去掉 Gemini 可能返回的 ```html ... ``` 包裹"""
+    text = text.strip()
+    if text.startswith('```'):
+        lines = text.splitlines()
+        # 去掉首行 (```html 或 ```)
+        lines = lines[1:]
+        # 去掉末行 (```)
+        if lines and lines[-1].strip() == '```':
+            lines = lines[:-1]
+        text = '\n'.join(lines)
+    return text.strip()
+
+
 # ─── Storage 下载 ───────────────────────────────────────────
 
 def _download_from_storage(storage_path: str) -> bytes:
@@ -27,20 +63,122 @@ def _download_from_storage(storage_path: str) -> bytes:
     return resp.content
 
 
-# ─── PDF 提取（结构化 HTML + 纯文本） ───────────────────────
+# ─── Gemini Vision 调用 ──────────────────────────────────────
 
-def _extract_pdf(raw: bytes) -> Tuple[str, str, str]:
-    """返回 (body_html, plain_text, title)
-    body_html: 带标题/加粗/代码/图片的 HTML
-    plain_text: 无格式纯文字（供 AI 摘要/翻译）
+def _call_gemini_vision(prompt: str, images: List[Tuple[str, str]], timeout: int = 180) -> str:
+    """调用 Gemini Vision，返回文本响应。images = [(mime_type, base64_data), ...]"""
+    api_key = os.environ.get('GEMINI_API_KEY', '')
+    if not api_key:
+        raise RuntimeError('GEMINI_API_KEY 未设置')
+
+    url = (
+        'https://generativelanguage.googleapis.com/v1beta/models/'
+        f'gemini-2.5-flash:generateContent?key={api_key}'
+    )
+
+    parts: List[Dict] = []
+    for mime_type, b64_data in images:
+        parts.append({'inline_data': {'mime_type': mime_type, 'data': b64_data}})
+    parts.append({'text': prompt})
+
+    body = json.dumps({'contents': [{'parts': parts}]}).encode()
+    req = urllib.request.Request(
+        url, data=body, headers={'Content-Type': 'application/json'}
+    )
+
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                result = json.loads(resp.read())
+            return result['candidates'][0]['content']['parts'][0]['text']
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt < 2:
+                wait = 20 * (attempt + 1)
+                logger.warning(f'Gemini Vision 429，{wait}s 后重试')
+                time.sleep(wait)
+            else:
+                raise
+
+
+_PDF_VISION_PROMPT = """\
+以下是PDF文档的连续页面截图，请将这些页面的内容**完整**转换为HTML格式。
+
+转换规则：
+1. 文字内容必须完整保留，不得遗漏任何段落
+2. 表格 → <table><thead><tr><th></th></tr></thead><tbody><tr><td></td></tr></tbody></table>
+3. 标题根据视觉大小 → <h1>/<h2>/<h3>/<h4>
+4. 加粗 → <b>，斜体 → <i>
+5. 重点框/提示框/callout → <div class="callout" style="border:1px solid #d1d5db;\
+padding:12px 16px;margin:12px 0;border-radius:6px;background:#f9fafb;">
+6. 绿色边框或"推荐"类框 → style 加 border-left:4px solid #22c55e
+7. 红色边框或"不推荐"/"警告"类框 → style 加 border-left:4px solid #ef4444
+8. 其他有色边框框 → style 加 border-left:4px solid #f59e0b
+9. 无序列表 → <ul><li>，有序列表 → <ol><li>
+10. 普通段落 → <p>
+11. 忽略页眉/页脚/页码
+12. 多栏布局按阅读顺序线性输出
+13. 不包含 <html>/<head>/<body> 标签，只输出正文 HTML 片段
+14. 不要用 ```html``` 包裹
+"""
+
+
+# ─── PDF 提取（Vision 主路径 + dict 降级） ───────────────────
+
+def _extract_pdf_vision(raw: bytes) -> Tuple[str, str, str]:
+    """用 Gemini Vision 将 PDF 每页转为结构化 HTML。
+    返回 (body_html, plain_text, title)
     """
+    import fitz
+
+    doc = fitz.open(stream=raw, filetype='pdf')
+    title = (doc.metadata or {}).get('title', '') or ''
+    total_pages = doc.page_count
+    logger.info(f'PDF Vision 提取：共 {total_pages} 页')
+
+    BATCH_SIZE = 5   # 每次 API 调用处理的页数
+    DPI = 96         # 分辨率：794×1123px（A4），平衡质量与体积
+
+    html_parts: List[str] = []
+    plain_parts: List[str] = []
+
+    pages = list(doc)
+    for batch_start in range(0, len(pages), BATCH_SIZE):
+        batch = pages[batch_start: batch_start + BATCH_SIZE]
+        end = min(batch_start + BATCH_SIZE, total_pages)
+        logger.info(f'  处理第 {batch_start + 1}–{end} 页（共 {total_pages} 页）')
+
+        images: List[Tuple[str, str]] = []
+        for page in batch:
+            pix = page.get_pixmap(dpi=DPI)
+            png_bytes = pix.tobytes('png')
+            images.append(('image/png', base64.b64encode(png_bytes).decode()))
+
+        try:
+            chunk_html = _call_gemini_vision(_PDF_VISION_PROMPT, images, timeout=180)
+            chunk_html = _strip_code_fence(chunk_html)
+            if chunk_html:
+                html_parts.append(chunk_html)
+                plain_parts.append(_html_to_plain(chunk_html))
+        except Exception as e:
+            logger.warning(f'Vision 处理第 {batch_start + 1}–{end} 页失败，降级文字提取: {e}')
+            for page in batch:
+                text = page.get_text().strip()
+                if text:
+                    html_parts.append(f'<p>{_esc(text)}</p>')
+                    plain_parts.append(text)
+
+    doc.close()
+    return '\n'.join(html_parts), '\n\n'.join(plain_parts), title
+
+
+def _extract_pdf_dict(raw: bytes) -> Tuple[str, str, str]:
+    """基于字体大小的结构化提取（降级备用）。返回 (body_html, plain_text, title)"""
     import fitz
     import statistics
 
     doc = fitz.open(stream=raw, filetype='pdf')
     title = (doc.metadata or {}).get('title', '') or ''
 
-    # Pass 1: 收集所有字体大小，推断正文基准
     all_sizes: List[float] = []
     for page in doc:
         for block in page.get_text('dict')['blocks']:
@@ -52,29 +190,23 @@ def _extract_pdf(raw: bytes) -> Tuple[str, str, str]:
                         all_sizes.append(span['size'])
 
     body_size = statistics.median(all_sizes) if all_sizes else 10.0
-    h1_min = body_size * 1.7
-    h2_min = body_size * 1.35
-    h3_min = body_size * 1.15
+    h1_min, h2_min, h3_min = body_size * 1.7, body_size * 1.35, body_size * 1.15
 
-    # 目录（书签/大纲）
     toc = doc.get_toc()
     toc_html = ''
     if toc:
-        items = []
+        items = ['<div class="toc"><h2>目录</h2><ul>']
         for level, t, _ in toc[:80]:
             pad = '　' * (level - 1)
             items.append(f'<li>{pad}{_esc(t)}</li>')
-        toc_html = '<div class="toc"><h2>目录</h2><ul>' + ''.join(items) + '</ul></div><hr>\n'
+        toc_html = ''.join(items) + '</ul></div><hr>\n'
 
-    # Pass 2: 逐页提取
     html_parts = [toc_html]
     plain_parts: List[str] = []
     seen_xrefs: set = set()
 
     for page in doc:
         page_dict = page.get_text('dict')
-
-        # 本页图片：xref → data URI
         xref_to_uri: Dict[int, str] = {}
         for img_info in page.get_images(full=True):
             xref = img_info[0]
@@ -93,14 +225,12 @@ def _extract_pdf(raw: bytes) -> Tuple[str, str, str]:
 
         for block in page_dict['blocks']:
             btype = block.get('type')
-
-            if btype == 1:  # 图片块
+            if btype == 1:
                 xref = block.get('xref', 0)
                 uri = xref_to_uri.get(xref)
                 if uri:
                     html_parts.append(f'<p><img src="{uri}" /></p>')
                 continue
-
             if btype != 0:
                 continue
 
@@ -117,22 +247,17 @@ def _extract_pdf(raw: bytes) -> Tuple[str, str, str]:
                         continue
                     size = span['size']
                     flags = span.get('flags', 0)
-                    is_bold = bool(flags & 16)
-                    is_italic = bool(flags & 2)
-                    is_mono = bool(flags & 8)
                     block_sizes.append(size)
-
                     t = _esc(text)
-                    if is_mono:
+                    if bool(flags & 8):
                         t = f'<code>{t}</code>'
                     else:
-                        if is_bold:
+                        if bool(flags & 16):
                             t = f'<b>{t}</b>'
-                        if is_italic:
+                        if bool(flags & 2):
                             t = f'<i>{t}</i>'
                     span_html.append(t)
                     span_plain.append(text)
-
                 if span_html:
                     block_html_lines.append(''.join(span_html))
                     block_plain_lines.append(''.join(span_plain))
@@ -152,7 +277,6 @@ def _extract_pdf(raw: bytes) -> Tuple[str, str, str]:
                 html_parts.append(f'<h3>{combined_html}</h3>')
             else:
                 html_parts.append(f'<p>{combined_html}</p>')
-
             plain_parts.append(combined_plain)
 
     doc.close()
@@ -162,12 +286,9 @@ def _extract_pdf(raw: bytes) -> Tuple[str, str, str]:
 # ─── DOCX 提取 ──────────────────────────────────────────────
 
 def _extract_docx(raw: bytes) -> Tuple[str, str, str]:
-    """返回 (body_html, plain_text, title)"""
     from docx import Document
-
     doc = Document(BytesIO(raw))
     title = (doc.core_properties.title or '').strip()
-
     html_parts: List[str] = []
     plain_parts: List[str] = []
 
@@ -204,9 +325,7 @@ def _extract_docx(raw: bytes) -> Tuple[str, str, str]:
 # ─── PPTX 提取 ──────────────────────────────────────────────
 
 def _extract_pptx(raw: bytes) -> Tuple[str, str, str]:
-    """返回 (body_html, plain_text, title)"""
     from pptx import Presentation
-
     prs = Presentation(BytesIO(raw))
     title = (prs.core_properties.title or '').strip()
     html_parts: List[str] = []
@@ -232,12 +351,9 @@ def _extract_pptx(raw: bytes) -> Tuple[str, str, str]:
 # ─── TXT/MD 提取 ─────────────────────────────────────────────
 
 def _extract_text_file(raw: bytes) -> Tuple[str, str, str]:
-    """返回 (body_html, plain_text, title)"""
     text = raw.decode('utf-8', errors='replace')
     first_line = text.split('\n')[0].strip().lstrip('#').strip()
     title = first_line[:80] if first_line else ''
-    # 对 md 文件保留原文（Obsidian 直接渲染），包裹在 <pre> 中防止 HTML 注入
-    # 普通段落处理
     paras = [p.strip() for p in text.split('\n\n') if p.strip()]
     html_parts = [f'<p>{_esc(p)}</p>' for p in paras]
     return '\n'.join(html_parts), text, title
@@ -248,7 +364,11 @@ def _extract_text_file(raw: bytes) -> Tuple[str, str, str]:
 def _extract_document(raw: bytes, ext: str) -> Tuple[str, str, str]:
     """返回 (body_html, plain_text, title)"""
     if ext == 'pdf':
-        return _extract_pdf(raw)
+        has_gemini = bool(os.environ.get('GEMINI_API_KEY', ''))
+        if has_gemini:
+            return _extract_pdf_vision(raw)
+        logger.warning('GEMINI_API_KEY 未设置，降级为字体分析提取')
+        return _extract_pdf_dict(raw)
     elif ext == 'docx':
         return _extract_docx(raw)
     elif ext == 'pptx':
@@ -337,11 +457,8 @@ def _build_document_html(plain_text: str, is_english: bool, body_html: Optional[
 async def handle_document(article_id: str) -> Dict[str, Any]:
     media_storage_path = os.environ.get('MEDIA_STORAGE_PATH', '')
     if not media_storage_path:
-        return {
-            'article_id': article_id,
-            'status': 'error',
-            'error_message': 'MEDIA_STORAGE_PATH 未设置',
-        }
+        return {'article_id': article_id, 'status': 'error',
+                'error_message': 'MEDIA_STORAGE_PATH 未设置'}
 
     ext = media_storage_path.rsplit('.', 1)[-1].lower()
 
@@ -363,9 +480,8 @@ async def handle_document(article_id: str) -> Dict[str, Any]:
                 'error_message': '文档内容为空，无法处理。'}
 
     is_english = _detect_english(plain_text)
-    logger.info(f'语言检测：{"英文" if is_english else "中文"}，body_html={len(body_html)} chars')
+    logger.info(f'语言：{"英文" if is_english else "中文"}，body_html={len(body_html)} chars')
 
-    logger.info('AI 处理：生成摘要 + 组装 HTML')
     content_html = _build_document_html(plain_text, is_english, body_html=body_html)
 
     return {
