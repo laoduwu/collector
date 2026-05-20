@@ -1,8 +1,8 @@
 """文档处理器：PDF/DOCX/PPTX/TXT/MD 提取、摘要、双语翻译、HTML 组装"""
-import json
+import base64
 import os
 from io import BytesIO
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -10,10 +10,15 @@ from utils.logger import logger
 from video_processor import _llm_json, _translate_paragraphs
 
 
+# ─── 辅助 ────────────────────────────────────────────────────
+
+def _esc(text: str) -> str:
+    return text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+
 # ─── Storage 下载 ───────────────────────────────────────────
 
 def _download_from_storage(storage_path: str) -> bytes:
-    """从 Supabase Storage media-temp bucket 下载文件"""
     supabase_url = os.environ['SUPABASE_URL']
     service_key = os.environ['SUPABASE_SERVICE_ROLE_KEY']
     url = f'{supabase_url}/storage/v1/object/media-temp/{storage_path}'
@@ -22,52 +27,226 @@ def _download_from_storage(storage_path: str) -> bytes:
     return resp.content
 
 
-# ─── 文字提取 ────────────────────────────────────────────────
+# ─── PDF 提取（结构化 HTML + 纯文本） ───────────────────────
 
-def _extract_pdf(raw: bytes) -> Tuple[str, str]:
-    import fitz  # pymupdf
+def _extract_pdf(raw: bytes) -> Tuple[str, str, str]:
+    """返回 (body_html, plain_text, title)
+    body_html: 带标题/加粗/代码/图片的 HTML
+    plain_text: 无格式纯文字（供 AI 摘要/翻译）
+    """
+    import fitz
+    import statistics
+
     doc = fitz.open(stream=raw, filetype='pdf')
     title = (doc.metadata or {}).get('title', '') or ''
-    pages = [page.get_text().strip() for page in doc if page.get_text().strip()]
-    return '\n\n'.join(pages), title
+
+    # Pass 1: 收集所有字体大小，推断正文基准
+    all_sizes: List[float] = []
+    for page in doc:
+        for block in page.get_text('dict')['blocks']:
+            if block.get('type') != 0:
+                continue
+            for line in block['lines']:
+                for span in line['spans']:
+                    if span['text'].strip():
+                        all_sizes.append(span['size'])
+
+    body_size = statistics.median(all_sizes) if all_sizes else 10.0
+    h1_min = body_size * 1.7
+    h2_min = body_size * 1.35
+    h3_min = body_size * 1.15
+
+    # 目录（书签/大纲）
+    toc = doc.get_toc()
+    toc_html = ''
+    if toc:
+        items = []
+        for level, t, _ in toc[:80]:
+            pad = '　' * (level - 1)
+            items.append(f'<li>{pad}{_esc(t)}</li>')
+        toc_html = '<div class="toc"><h2>目录</h2><ul>' + ''.join(items) + '</ul></div><hr>\n'
+
+    # Pass 2: 逐页提取
+    html_parts = [toc_html]
+    plain_parts: List[str] = []
+    seen_xrefs: set = set()
+
+    for page in doc:
+        page_dict = page.get_text('dict')
+
+        # 本页图片：xref → data URI
+        xref_to_uri: Dict[int, str] = {}
+        for img_info in page.get_images(full=True):
+            xref = img_info[0]
+            if xref in seen_xrefs:
+                continue
+            try:
+                img_data = doc.extract_image(xref)
+                if not img_data:
+                    continue
+                ext = img_data.get('ext', 'png')
+                b64 = base64.b64encode(img_data['image']).decode()
+                xref_to_uri[xref] = f'data:image/{ext};base64,{b64}'
+                seen_xrefs.add(xref)
+            except Exception:
+                pass
+
+        for block in page_dict['blocks']:
+            btype = block.get('type')
+
+            if btype == 1:  # 图片块
+                xref = block.get('xref', 0)
+                uri = xref_to_uri.get(xref)
+                if uri:
+                    html_parts.append(f'<p><img src="{uri}" /></p>')
+                continue
+
+            if btype != 0:
+                continue
+
+            block_html_lines: List[str] = []
+            block_plain_lines: List[str] = []
+            block_sizes: List[float] = []
+
+            for line in block['lines']:
+                span_html: List[str] = []
+                span_plain: List[str] = []
+                for span in line['spans']:
+                    text = span['text']
+                    if not text.strip():
+                        continue
+                    size = span['size']
+                    flags = span.get('flags', 0)
+                    is_bold = bool(flags & 16)
+                    is_italic = bool(flags & 2)
+                    is_mono = bool(flags & 8)
+                    block_sizes.append(size)
+
+                    t = _esc(text)
+                    if is_mono:
+                        t = f'<code>{t}</code>'
+                    else:
+                        if is_bold:
+                            t = f'<b>{t}</b>'
+                        if is_italic:
+                            t = f'<i>{t}</i>'
+                    span_html.append(t)
+                    span_plain.append(text)
+
+                if span_html:
+                    block_html_lines.append(''.join(span_html))
+                    block_plain_lines.append(''.join(span_plain))
+
+            if not block_html_lines:
+                continue
+
+            combined_html = ' '.join(block_html_lines)
+            combined_plain = ' '.join(block_plain_lines)
+            avg_size = statistics.mean(block_sizes) if block_sizes else body_size
+
+            if avg_size >= h1_min:
+                html_parts.append(f'<h1>{combined_html}</h1>')
+            elif avg_size >= h2_min:
+                html_parts.append(f'<h2>{combined_html}</h2>')
+            elif avg_size >= h3_min:
+                html_parts.append(f'<h3>{combined_html}</h3>')
+            else:
+                html_parts.append(f'<p>{combined_html}</p>')
+
+            plain_parts.append(combined_plain)
+
+    doc.close()
+    return '\n'.join(html_parts), '\n\n'.join(plain_parts), title
 
 
-def _extract_docx(raw: bytes) -> Tuple[str, str]:
+# ─── DOCX 提取 ──────────────────────────────────────────────
+
+def _extract_docx(raw: bytes) -> Tuple[str, str, str]:
+    """返回 (body_html, plain_text, title)"""
     from docx import Document
+
     doc = Document(BytesIO(raw))
     title = (doc.core_properties.title or '').strip()
-    paragraphs = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
-    return '\n\n'.join(paragraphs), title
+
+    html_parts: List[str] = []
+    plain_parts: List[str] = []
+
+    for para in doc.paragraphs:
+        text = para.text.strip()
+        if not text:
+            continue
+        style_name = para.style.name if para.style else ''
+        plain_parts.append(text)
+
+        if 'Heading 1' in style_name:
+            html_parts.append(f'<h1>{_esc(text)}</h1>')
+        elif 'Heading 2' in style_name:
+            html_parts.append(f'<h2>{_esc(text)}</h2>')
+        elif 'Heading 3' in style_name or 'Heading 4' in style_name:
+            html_parts.append(f'<h3>{_esc(text)}</h3>')
+        else:
+            run_parts: List[str] = []
+            for run in para.runs:
+                if not run.text:
+                    continue
+                t = _esc(run.text)
+                if run.bold:
+                    t = f'<b>{t}</b>'
+                if run.italic:
+                    t = f'<i>{t}</i>'
+                run_parts.append(t)
+            if run_parts:
+                html_parts.append('<p>' + ''.join(run_parts) + '</p>')
+
+    return '\n'.join(html_parts), '\n\n'.join(plain_parts), title
 
 
-def _extract_pptx(raw: bytes) -> Tuple[str, str]:
+# ─── PPTX 提取 ──────────────────────────────────────────────
+
+def _extract_pptx(raw: bytes) -> Tuple[str, str, str]:
+    """返回 (body_html, plain_text, title)"""
     from pptx import Presentation
+
     prs = Presentation(BytesIO(raw))
     title = (prs.core_properties.title or '').strip()
-    slides = []
+    html_parts: List[str] = []
+    plain_parts: List[str] = []
+
     for i, slide in enumerate(prs.slides, 1):
-        parts = []
+        slide_texts: List[str] = []
         for shape in slide.shapes:
             if shape.has_text_frame:
                 for para in shape.text_frame.paragraphs:
                     t = para.text.strip()
                     if t:
-                        parts.append(t)
-        if parts:
-            slides.append(f'[幻灯片 {i}]\n' + '\n'.join(parts))
-    return '\n\n'.join(slides), title
+                        slide_texts.append(t)
+        if slide_texts:
+            html_parts.append(f'<h2>幻灯片 {i}</h2>')
+            for t in slide_texts:
+                html_parts.append(f'<p>{_esc(t)}</p>')
+            plain_parts.append(f'[幻灯片 {i}]\n' + '\n'.join(slide_texts))
+
+    return '\n'.join(html_parts), '\n\n'.join(plain_parts), title
 
 
-def _extract_text_file(raw: bytes) -> Tuple[str, str]:
+# ─── TXT/MD 提取 ─────────────────────────────────────────────
+
+def _extract_text_file(raw: bytes) -> Tuple[str, str, str]:
+    """返回 (body_html, plain_text, title)"""
     text = raw.decode('utf-8', errors='replace')
-    # 取首行作为标题（去掉 Markdown # 前缀，最多 80 字符）
     first_line = text.split('\n')[0].strip().lstrip('#').strip()
     title = first_line[:80] if first_line else ''
-    return text, title
+    # 对 md 文件保留原文（Obsidian 直接渲染），包裹在 <pre> 中防止 HTML 注入
+    # 普通段落处理
+    paras = [p.strip() for p in text.split('\n\n') if p.strip()]
+    html_parts = [f'<p>{_esc(p)}</p>' for p in paras]
+    return '\n'.join(html_parts), text, title
 
 
-def _extract_text(raw: bytes, ext: str) -> Tuple[str, str]:
-    """返回 (全文纯文字, 标题)"""
+# ─── 统一入口 ────────────────────────────────────────────────
+
+def _extract_document(raw: bytes, ext: str) -> Tuple[str, str, str]:
+    """返回 (body_html, plain_text, title)"""
     if ext == 'pdf':
         return _extract_pdf(raw)
     elif ext == 'docx':
@@ -83,7 +262,6 @@ def _extract_text(raw: bytes, ext: str) -> Tuple[str, str]:
 # ─── 语言检测 ────────────────────────────────────────────────
 
 def _detect_english(text: str) -> bool:
-    """非 ASCII 字符（主要为中文）占比 < 40% 则判定为英文文档"""
     sample = text[:2000]
     if not sample:
         return False
@@ -94,36 +272,29 @@ def _detect_english(text: str) -> bool:
 # ─── HTML 组装 ───────────────────────────────────────────────
 
 def _paragraphs_to_html(text: str) -> str:
-    """将纯文本按空行分段，包裹为 <p> 标签"""
     paras = [p.strip() for p in text.split('\n\n') if p.strip()]
-    return ''.join(f'<p>{p}</p>' for p in paras)
+    return ''.join(f'<p>{_esc(p)}</p>' for p in paras)
 
 
 def _bilingual_html(text: str) -> str:
-    """英文文档：每段原文下紧跟中文译文"""
     raw_paras = [p.strip() for p in text.split('\n\n') if p.strip()]
     if not raw_paras:
         return ''
-
-    # 构造 _translate_paragraphs 期望的格式 [{start, texts}]
     fake_paras = [{'start': i, 'texts': [p]} for i, p in enumerate(raw_paras)]
-
     try:
         translations = _translate_paragraphs(fake_paras)
     except Exception as e:
         logger.warning(f'批量翻译失败，降级为原文: {e}')
         translations = [''] * len(raw_paras)
-
     parts = []
     for orig, zh in zip(raw_paras, translations):
-        parts.append(f'<p lang="en">{orig}</p>')
+        parts.append(f'<p lang="en">{_esc(orig)}</p>')
         if zh:
-            parts.append(f'<p lang="zh">{zh}</p>')
+            parts.append(f'<p lang="zh">{_esc(zh)}</p>')
     return ''.join(parts)
 
 
 def _build_summary_html(text: str) -> str:
-    """调用 LLM 生成中文摘要与核心要点，返回 HTML 片段"""
     prompt = (
         '请为以下文档生成中文摘要与核心要点。'
         '返回 JSON 格式：{"summary": "一段话摘要", "key_points": ["要点1", "要点2", ...]}\n\n'
@@ -136,18 +307,19 @@ def _build_summary_html(text: str) -> str:
     except Exception as e:
         logger.warning(f'摘要生成失败: {e}')
         return '<p>（摘要生成失败）</p>'
-
-    points_html = ''.join(f'<li>{p}</li>' for p in key_points) if key_points else ''
-    return (
-        f'<p>{summary}</p>'
-        + (f'<ul>{points_html}</ul>' if points_html else '')
-    )
+    points_html = ''.join(f'<li>{_esc(p)}</li>' for p in key_points) if key_points else ''
+    return f'<p>{_esc(summary)}</p>' + (f'<ul>{points_html}</ul>' if points_html else '')
 
 
-def _build_document_html(text: str, is_english: bool) -> str:
-    """组装最终 HTML：摘要段 + 分隔线 + 正文段"""
-    summary_html = _build_summary_html(text)
-    body_html = _bilingual_html(text) if is_english else _paragraphs_to_html(text)
+def _build_document_html(plain_text: str, is_english: bool, body_html: Optional[str] = None) -> str:
+    summary_html = _build_summary_html(plain_text)
+    if body_html:
+        final_body = body_html
+    elif is_english:
+        final_body = _bilingual_html(plain_text)
+    else:
+        final_body = _paragraphs_to_html(plain_text)
+
     return (
         '<div class="doc-summary">'
         '<h2>摘要与核心要点</h2>'
@@ -155,7 +327,7 @@ def _build_document_html(text: str, is_english: bool) -> str:
         + '</div>'
         '<hr>'
         '<div class="doc-content">'
-        + body_html
+        + final_body
         + '</div>'
     )
 
@@ -173,7 +345,6 @@ async def handle_document(article_id: str) -> Dict[str, Any]:
 
     ext = media_storage_path.rsplit('.', 1)[-1].lower()
 
-    # 老格式提前返回友好错误
     if ext == 'doc':
         return {'article_id': article_id, 'status': 'error',
                 'error_message': '暂不支持 .doc 格式，请转换为 .docx 后重新发送。'}
@@ -184,24 +355,24 @@ async def handle_document(article_id: str) -> Dict[str, Any]:
     logger.info(f'下载文档：{media_storage_path}')
     raw_bytes = _download_from_storage(media_storage_path)
 
-    logger.info(f'提取文字：ext={ext}，大小={len(raw_bytes)} bytes')
-    text, title = _extract_text(raw_bytes, ext)
+    logger.info(f'提取内容：ext={ext}，大小={len(raw_bytes)} bytes')
+    body_html, plain_text, title = _extract_document(raw_bytes, ext)
 
-    if not text.strip():
+    if not plain_text.strip():
         return {'article_id': article_id, 'status': 'error',
                 'error_message': '文档内容为空，无法处理。'}
 
-    is_english = _detect_english(text)
-    logger.info(f'语言检测：{"英文" if is_english else "中文"}')
+    is_english = _detect_english(plain_text)
+    logger.info(f'语言检测：{"英文" if is_english else "中文"}，body_html={len(body_html)} chars')
 
-    logger.info('AI 处理：生成摘要 + HTML 格式化')
-    content_html = _build_document_html(text, is_english)
+    logger.info('AI 处理：生成摘要 + 组装 HTML')
+    content_html = _build_document_html(plain_text, is_english, body_html=body_html)
 
     return {
         'article_id': article_id,
         'status': 'success',
         'title': title,
         'content_md': content_html,
-        'content_text': text[:4000],
-        'video_storage_path': media_storage_path,  # 复用字段触发 signed URL 生成
+        'content_text': plain_text[:4000],
+        'video_storage_path': media_storage_path,
     }
