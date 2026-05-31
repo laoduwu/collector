@@ -154,6 +154,9 @@ async def run() -> None:
         elif content_type == "document":
             from document_processor import handle_document
             payload = await handle_document(article_id)
+        elif content_type == "image":
+            from image_processor import handle_image
+            payload = await handle_image(article_id)
         else:
             raise ValueError(f"不支持的 content_type: {content_type}")
     except Exception as e:
