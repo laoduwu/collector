@@ -4,7 +4,6 @@ import base64
 import json
 import os
 import re
-import struct
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -377,384 +376,6 @@ def _identify_keyframes(transcript_text: str, video_duration_sec: float = 0) -> 
     return []
 
 
-# ────────────────────────────────────────────────
-# 微信视频号 Isaac64 解密
-# ────────────────────────────────────────────────
-
-_U64 = 0xFFFFFFFFFFFFFFFF
-_GOLDEN = 0x9e3779b97f4a7c13
-
-
-def _u64(x: int) -> int:
-    return x & _U64
-
-
-def _isaac64_mix(a, b, c, d, e, f, g, h):
-    a = _u64(a - e); f = _u64(f ^ (h >> 9));  h = _u64(h + a)
-    b = _u64(b - f); g = _u64(g ^ _u64(a << 9)); a = _u64(a + b)
-    c = _u64(c - g); h = _u64(h ^ (b >> 23)); b = _u64(b + c)
-    d = _u64(d - h); a = _u64(a ^ _u64(c << 15)); c = _u64(c + d)
-    e = _u64(e - a); b = _u64(b ^ (d >> 14)); d = _u64(d + e)
-    f = _u64(f - b); c = _u64(c ^ _u64(e << 20)); e = _u64(e + f)
-    g = _u64(g - c); d = _u64(d ^ (f >> 17)); f = _u64(f + g)
-    h = _u64(h - d); e = _u64(e ^ _u64(g << 14)); g = _u64(g + h)
-    return a, b, c, d, e, f, g, h
-
-
-class _RandCtx64:
-    __slots__ = ('cnt', 'seed', 'mm', 'aa', 'bb', 'cc')
-
-    def __init__(self):
-        self.cnt = 255
-        self.seed = [0] * 256
-        self.mm = [0] * 256
-        self.aa = self.bb = self.cc = 0
-
-    def _step(self):
-        self.cc = _u64(self.cc + 1)
-        self.bb = _u64(self.bb + self.cc)
-        for i in range(256):
-            x = self.mm[i]
-            m = i & 3
-            if m == 0:
-                self.aa = _u64(~_u64(self.aa ^ _u64(self.aa << 21)))
-            elif m == 1:
-                self.aa = _u64(self.aa ^ (self.aa >> 5))
-            elif m == 2:
-                self.aa = _u64(self.aa ^ _u64(self.aa << 12))
-            else:
-                self.aa = _u64(self.aa ^ (self.aa >> 33))
-            self.aa = _u64(self.aa + self.mm[(i + 128) & 0xFF])
-            y = _u64(self.mm[(x >> 3) & 0xFF] + self.aa + self.bb)
-            self.mm[i] = y
-            self.bb = _u64(self.mm[(y >> 11) & 0xFF] + x)
-            self.seed[i] = self.bb
-
-    def next(self) -> int:
-        v = self.seed[self.cnt]
-        if self.cnt == 0:
-            self._step()
-            self.cnt = 255
-        else:
-            self.cnt -= 1
-        return v
-
-
-def _make_isaac64(enc_key: int) -> _RandCtx64:
-    ctx = _RandCtx64()
-    ctx.seed[0] = _u64(enc_key)
-    a = b = c = d = e = f = g = h = _GOLDEN
-    for _ in range(4):
-        a, b, c, d, e, f, g, h = _isaac64_mix(a, b, c, d, e, f, g, h)
-    for i in range(0, 256, 8):
-        a = _u64(a + ctx.seed[i]);   b = _u64(b + ctx.seed[i+1])
-        c = _u64(c + ctx.seed[i+2]); d = _u64(d + ctx.seed[i+3])
-        e = _u64(e + ctx.seed[i+4]); f = _u64(f + ctx.seed[i+5])
-        g = _u64(g + ctx.seed[i+6]); h = _u64(h + ctx.seed[i+7])
-        a, b, c, d, e, f, g, h = _isaac64_mix(a, b, c, d, e, f, g, h)
-        ctx.mm[i:i+8] = [a, b, c, d, e, f, g, h]
-    for i in range(0, 256, 8):
-        a = _u64(a + ctx.mm[i]);   b = _u64(b + ctx.mm[i+1])
-        c = _u64(c + ctx.mm[i+2]); d = _u64(d + ctx.mm[i+3])
-        e = _u64(e + ctx.mm[i+4]); f = _u64(f + ctx.mm[i+5])
-        g = _u64(g + ctx.mm[i+6]); h = _u64(h + ctx.mm[i+7])
-        a, b, c, d, e, f, g, h = _isaac64_mix(a, b, c, d, e, f, g, h)
-        ctx.mm[i:i+8] = [a, b, c, d, e, f, g, h]
-    ctx._step()
-    return ctx
-
-
-def _decrypt_wechat_video(video_path: str, decode_key: int) -> None:
-    """用 Isaac64 XOR 解密视频文件前 131072 字节（原地修改）"""
-    ENC_LEN = 131072
-    data = bytearray(Path(video_path).read_bytes())
-    actual_enc = min(ENC_LEN, len(data))
-    ctx = _make_isaac64(decode_key)
-    i = 0
-    while i < actual_enc:
-        rand_val = ctx.next()
-        key_bytes = struct.pack('>Q', rand_val)
-        for j in range(8):
-            idx = i + j
-            if idx >= actual_enc:
-                break
-            data[idx] ^= key_bytes[j]
-        i += 8
-    Path(video_path).write_bytes(bytes(data))
-    logger.info(f'Isaac64 解密完成: decode_key={decode_key}, 解密前 {actual_enc} 字节')
-
-
-# ────────────────────────────────────────────────
-# 微信视频号下载（三级降级）
-# ────────────────────────────────────────────────
-
-def _sph_to_preview_url(url: str) -> str:
-    """将 weixin.qq.com/sph/XXX 短链转为 channels.weixin.qq.com/finder-preview 预览 URL"""
-    import re
-    m = re.search(r'/sph/([A-Za-z0-9]+)', url)
-    if m:
-        return f'https://channels.weixin.qq.com/finder-preview/pages/sph?id={m.group(1)}'
-    return url
-
-
-def _find_decode_key_in_json(obj: Any) -> Optional[int]:
-    """递归搜索 JSON 对象中的 decodeKey / decode_key 字段"""
-    if isinstance(obj, dict):
-        for k in ('decodeKey', 'decode_key'):
-            if k in obj:
-                try:
-                    return int(obj[k])
-                except (ValueError, TypeError):
-                    pass
-        for v in obj.values():
-            result = _find_decode_key_in_json(v)
-            if result is not None:
-                return result
-    elif isinstance(obj, list):
-        for item in obj:
-            result = _find_decode_key_in_json(item)
-            if result is not None:
-                return result
-    return None
-
-
-async def _intercept_wechat_video_url(page_url: str) -> Tuple[str, Optional[int]]:
-    """
-    Playwright 打开视频号 finder-preview 页。
-    返回 (cdn_url, decode_key)，decode_key 可能为 None（若页面未通过 HTTP 暴露）。
-    """
-    from playwright.async_api import async_playwright
-    video_url: Optional[str] = None
-    decode_key: Optional[int] = None
-
-    preview_url = _sph_to_preview_url(page_url)
-    logger.info(f'Playwright 加载预览页: {preview_url}')
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        ctx = await browser.new_context(
-            user_agent=(
-                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
-                'AppleWebKit/537.36 (KHTML, like Gecko) '
-                'Chrome/124.0.0.0 Safari/537.36'
-            ),
-            viewport={'width': 1280, 'height': 800},
-        )
-
-        def _is_video_cdn(u: str) -> bool:
-            cdn_hosts = (
-                'finder.video.qq.com',
-                'finderoutside.video.qq.com',
-                'wxapp.tc.qq.com',
-                'vod2.myqcloud.com',
-            )
-            return any(h in u for h in cdn_hosts) and (
-                '.mp4' in u or 'stodownload' in u or 'encfilekey' in u
-            )
-
-        async def on_request(request):
-            nonlocal video_url
-            if video_url:
-                return
-            if _is_video_cdn(request.url):
-                logger.info(f'拦截到视频 CDN URL: {request.url[:80]}...')
-                video_url = request.url
-
-        async def on_response(response):
-            nonlocal video_url, decode_key
-            u = response.url
-            ct = response.headers.get('content-type', '')
-
-            # CDN 视频响应
-            if not video_url and 'video' in ct and _is_video_cdn(u):
-                logger.info(f'Response 拦截到视频: {u[:80]}...')
-                video_url = u
-
-            # WeChat API JSON 响应 → 搜寻 decodeKey
-            if decode_key is None and 'json' in ct:
-                weixin_domains = (
-                    'channels.weixin.qq.com',
-                    'res.wx.qq.com',
-                    'finder.video.qq.com',
-                    'mp.weixin.qq.com',
-                )
-                if any(d in u for d in weixin_domains):
-                    try:
-                        body = await response.body()
-                        data = json.loads(body)
-                        found = _find_decode_key_in_json(data)
-                        if found is not None:
-                            decode_key = found
-                            logger.info(f'从 API 响应中获取 decode_key={decode_key}: {u[:60]}')
-                    except Exception:
-                        pass
-
-        page = await ctx.new_page()
-        page.on('request', on_request)
-        page.on('response', on_response)
-        try:
-            await page.goto(preview_url, wait_until='domcontentloaded', timeout=30000)
-            try:
-                await page.wait_for_selector('video, .video-player, [class*="player"]', timeout=10000)
-            except Exception:
-                pass
-            for selector in ['video', '.play-btn', '[class*="play"]', 'button']:
-                try:
-                    el = page.locator(selector).first
-                    if await el.count() > 0:
-                        await el.click(timeout=3000)
-                        break
-                except Exception:
-                    pass
-            # 等待 CDN URL 出现，同时继续收集 decodeKey
-            for _ in range(12):
-                if video_url and decode_key is not None:
-                    break
-                await asyncio.sleep(1)
-
-            # 最后尝试从页面 JS 全局变量读取 decodeKey
-            if decode_key is None:
-                try:
-                    val = await page.evaluate(
-                        '(()=>{'
-                        'const sources=['
-                        'window.__INITIAL_STATE__,'
-                        'window.__pinia,'
-                        'window.__wechat_video_data__,'
-                        '];'
-                        'for(const s of sources){'
-                        'if(!s)continue;'
-                        'const str=JSON.stringify(s);'
-                        'const m=str.match(/"(?:decodeKey|decode_key)"\s*:\s*"?(\d+)"?/);'
-                        'if(m)return parseInt(m[1]);'
-                        '}'
-                        'return null;'
-                        '})()'
-                    )
-                    if val:
-                        decode_key = int(val)
-                        logger.info(f'从页面 JS 全局变量获取 decode_key={decode_key}')
-                except Exception:
-                    pass
-        finally:
-            await browser.close()
-
-    if not video_url:
-        raise RuntimeError('Playwright 未拦截到视频 CDN URL（finder.video.qq.com）')
-
-    if decode_key is None:
-        logger.warning(
-            'decode_key 未能从页面获取（WeChat 使用专有 WeixinJSBridge，'
-            '普通浏览器无法访问）。将下载加密文件。'
-        )
-    return video_url, decode_key
-
-
-def _is_valid_video(path: str) -> bool:
-    """ffprobe 验证文件是有效视频（duration > 0）"""
-    try:
-        result = subprocess.run(
-            ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
-             '-of', 'json', path],
-            capture_output=True, text=True, timeout=30,
-        )
-        if result.returncode != 0:
-            return False
-        duration = float(json.loads(result.stdout).get('format', {}).get('duration', 0))
-        return duration > 0
-    except Exception:
-        return False
-
-
-async def _download_wechat_video(url: str, tmpdir: str) -> str:
-    """
-    微信视频号视频下载，三级降级：
-    1. yt-dlp 直接下载（极少成功，通常为加密文件）
-    2. Playwright 拦截 CDN URL + Isaac64 解密
-    3. 报错
-    返回已解密的有效视频文件路径。
-    """
-    out_path = os.path.join(tmpdir, 'wechat_source.mp4')
-
-    # Level 1: yt-dlp 直接
-    try:
-        cmd = [
-            'yt-dlp',
-            '--format', 'best[ext=mp4]/best',
-            '--merge-output-format', 'mp4',
-            '--output', out_path,
-            '--no-warnings', '--quiet',
-            url,
-        ]
-        subprocess.run(cmd, check=True, capture_output=True, timeout=180)
-        if os.path.exists(out_path) and _is_valid_video(out_path):
-            logger.info(f'yt-dlp 下载视频号成功: {os.path.getsize(out_path) // 1024}KB')
-            return out_path
-        else:
-            logger.warning('yt-dlp 下载内容无效（可能是加密文件），尝试 Playwright + 解密')
-    except Exception as e:
-        logger.warning(f'yt-dlp 下载视频号失败，尝试 Playwright: {e}')
-
-    # Level 2: Playwright 拦截 CDN URL + Isaac64 解密
-    try:
-        cdn_url, decode_key = await _intercept_wechat_video_url(url)
-
-        # 用 curl 直接下载（避免 yt-dlp 对 CDN URL 的二次处理）
-        curl_cmd = [
-            'curl', '-L', '-s', '--max-time', '300',
-            '-H', 'Referer: https://channels.weixin.qq.com/',
-            '-H', 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-            '-o', out_path,
-            cdn_url,
-        ]
-        subprocess.run(curl_cmd, check=True, capture_output=True, timeout=330)
-
-        if not os.path.exists(out_path) or os.path.getsize(out_path) < 1024:
-            raise RuntimeError('curl 下载文件为空或过小')
-
-        file_size_kb = os.path.getsize(out_path) // 1024
-        logger.info(f'CDN 下载完成: {file_size_kb}KB')
-
-        # 若拿到 decode_key，尝试 Isaac64 解密
-        if decode_key is not None:
-            _decrypt_wechat_video(out_path, decode_key)
-            if _is_valid_video(out_path):
-                logger.info(f'Isaac64 解密后验证通过: {file_size_kb}KB')
-                return out_path
-            else:
-                logger.warning('Isaac64 解密后 ffprobe 仍验证失败，decode_key 可能不正确')
-        else:
-            # 没有 decode_key：直接检查（极低概率是未加密）
-            if _is_valid_video(out_path):
-                logger.info(f'文件未加密，直接可用: {file_size_kb}KB')
-                return out_path
-            raise RuntimeError(
-                '视频文件已加密（需要 decode_key），但无法从页面获取。'
-                '微信视频号加密通过专有 WeixinJSBridge 传递密钥，'
-                '在无 WeChat 客户端的环境中无法解密。'
-            )
-    except RuntimeError:
-        raise
-    except Exception as e:
-        logger.warning(f'Playwright 拦截下载失败: {e}')
-
-    raise RuntimeError(
-        '微信视频号视频下载失败（yt-dlp 和 Playwright + Isaac64 均无法获取），'
-        '该视频已加密，需要 WeChat 客户端才能获取解密密钥'
-    )
-
-
-def _extract_audio_from_video(video_path: str, tmpdir: str) -> str:
-    """从视频文件提取音频（mp3），供 Whisper 转录"""
-    audio_path = os.path.join(tmpdir, 'audio.mp3')
-    subprocess.run([
-        'ffmpeg', '-i', video_path,
-        '-vn', '-ar', '16000', '-ac', '1', '-b:a', '64k',
-        '-y', audio_path,
-    ], check=True, capture_output=True, timeout=300)
-    logger.info(f'音频提取完成: {os.path.getsize(audio_path) // 1024}KB')
-    return audio_path
-
 
 # ────────────────────────────────────────────────
 # 视频下载 + 帧提取 + Vision 选帧
@@ -1006,11 +627,10 @@ async def handle_video(
 ) -> Dict[str, Any]:
     """
     视频处理全链路。
-    content_type: 'youtube' | 'bilibili' | 'wechat_video'
+    content_type: 'youtube' | 'bilibili'
     """
     import tempfile
     is_bilibili = content_type == 'bilibili'
-    is_wechat = content_type == 'wechat_video'
     save_video = os.environ.get('SAVE_VIDEO', '').lower() in ('true', '1', 'yes')
     tmpdir = tempfile.mkdtemp(prefix='rocvideo_')
     cookies_file: Optional[str] = None
@@ -1021,22 +641,15 @@ async def handle_video(
             cookies_file = os.path.join(tmpdir, 'cookies.txt')
             await _get_bilibili_cookies(source_url, cookies_file)
 
-        # 2. 字幕提取（视频号无官方字幕，直接跳过）
+        # 2. 字幕提取
         segments: List[Dict] = []
         lang: Optional[str] = None
-        if not is_wechat:
-            segments, lang = _extract_subtitles(source_url, tmpdir, cookies_file, is_bilibili)
+        segments, lang = _extract_subtitles(source_url, tmpdir, cookies_file, is_bilibili)
 
         # 3. 无字幕时的转录路径
-        wechat_video_path: Optional[str] = None
         if not segments:
             logger.info('无可用字幕，启动 Whisper 转录')
-            if is_wechat:
-                # 视频号：先下载视频，再提取音频
-                wechat_video_path = await _download_wechat_video(source_url, tmpdir)
-                audio_path = _extract_audio_from_video(wechat_video_path, tmpdir)
-            else:
-                audio_path = _download_audio(source_url, tmpdir, cookies_file)
+            audio_path = _download_audio(source_url, tmpdir, cookies_file)
             segments, lang = _transcribe_audio(audio_path)
 
         if not segments:
@@ -1065,7 +678,7 @@ async def handle_video(
         # 7. 视频下载 + 帧提取 + Vision 选帧
         article_images: Dict[str, str] = {}
         keyframe_para_map: Dict[int, str] = {}
-        downloaded_video_path: Optional[str] = wechat_video_path  # 视频号已下载则复用
+        downloaded_video_path: Optional[str] = None
 
         if keyframes:
             logger.info(f'开始提取 {len(keyframes)} 个关键帧')
@@ -1110,11 +723,7 @@ async def handle_video(
             try:
                 source_for_save = downloaded_video_path
                 if source_for_save is None:
-                    # keyframes 未触发下载，单独为 save_video 下载
-                    if is_wechat:
-                        source_for_save = await _download_wechat_video(source_url, tmpdir)
-                    else:
-                        source_for_save = _download_video(source_url, tmpdir, cookies_file)
+                    source_for_save = _download_video(source_url, tmpdir, cookies_file)
                 video_storage_path = _compress_and_upload_video(
                     source_for_save, article_id, tmpdir
                 )
@@ -1122,7 +731,7 @@ async def handle_video(
             except Exception as e:
                 logger.warning(f'视频保存失败（不影响转录结果）: {e}')
 
-        platform = '视频号' if is_wechat else ('B站' if is_bilibili else 'YouTube')
+        platform = 'B站' if is_bilibili else 'YouTube'
         title = f'{platform} 视频转录'
 
         payload: Dict[str, Any] = {
