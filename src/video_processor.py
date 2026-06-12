@@ -134,14 +134,26 @@ def _download_audio(url: str, tmpdir: str, cookies_file: Optional[str]) -> str:
     return out_path
 
 
+def _whisper_prompt() -> str:
+    """用术语表构造 Whisper 偏置 prompt，降低专有名词被听错的概率（上限约 224 token）"""
+    terms = _load_glossary()['terms']
+    if not terms:
+        return ''
+    return '可能出现的专有名词：' + '、'.join(terms) + '。'
+
+
 def _whisper_file(client: Any, audio_path: str) -> Tuple[List[Dict], str]:
     with open(audio_path, 'rb') as f:
-        result = client.audio.transcriptions.create(
-            model='whisper-large-v3',
-            file=f,
-            response_format='verbose_json',
-            timestamp_granularities=['segment'],
-        )
+        kwargs = {
+            'model': 'whisper-large-v3',
+            'file': f,
+            'response_format': 'verbose_json',
+            'timestamp_granularities': ['segment'],
+        }
+        prompt = _whisper_prompt()
+        if prompt:
+            kwargs['prompt'] = prompt
+        result = client.audio.transcriptions.create(**kwargs)
     segs = [
         {
             'start': float(s['start'] if isinstance(s, dict) else s.start),
@@ -335,6 +347,93 @@ def _translate_paragraphs(paragraphs: List[Dict]) -> List[str]:
     if not isinstance(result, list):
         return [''] * len(paragraphs)
     return result
+
+
+# ────────────────────────────────────────────────
+# 专有名词纠错（ASR 误识别还原）
+# ────────────────────────────────────────────────
+
+_GLOSSARY_CACHE: Optional[Dict] = None
+
+
+def _load_glossary() -> Dict:
+    """加载并缓存 glossary.json（与本模块同目录）；缺失或损坏时返回空表"""
+    global _GLOSSARY_CACHE
+    if _GLOSSARY_CACHE is not None:
+        return _GLOSSARY_CACHE
+    path = Path(__file__).with_name('glossary.json')
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+        _GLOSSARY_CACHE = {
+            'terms': data.get('terms', []),
+            'corrections': data.get('corrections', {}),
+        }
+    except Exception as e:
+        logger.warning(f'术语表加载失败，跳过纠错: {e}')
+        _GLOSSARY_CACHE = {'terms': [], 'corrections': {}}
+    return _GLOSSARY_CACHE
+
+
+def _correct_batch(texts: List[str], glossary: Dict) -> List[str]:
+    """对一批转录文本做上下文专有名词纠错，返回等长等序数组"""
+    hints = '\n'.join(f'- {w} → {r}' for w, r in glossary['corrections'].items())
+    prompt = (
+        'You are fixing speech-to-text (ASR) transcription errors. '
+        'The audio is about AI and software development. '
+        'Below is a list of proper nouns that are frequently mis-transcribed.\n\n'
+        'Canonical proper nouns:\n' + ', '.join(glossary['terms']) + '\n\n'
+        + ('Common mishearing → correct form (hints only, still judge by context):\n'
+           + hints + '\n\n' if hints else '')
+        + 'For each input line, ONLY restore mis-transcribed proper nouns from the list above '
+        'when the surrounding context clearly refers to that AI/dev tool. '
+        'Do NOT change anything else: keep wording, punctuation, casing and language identical. '
+        'When unsure, leave the line unchanged. '
+        'Return a JSON array of strings with EXACTLY the same length and order as the input. '
+        'Output only the JSON array.\n\n'
+        + json.dumps(texts, ensure_ascii=False)
+    )
+    result = _llm_json(prompt, timeout=90)
+    if not isinstance(result, list) or len(result) != len(texts):
+        raise ValueError(f'纠错返回长度不符：期望 {len(texts)}，实际 {result if not isinstance(result, list) else len(result)}')
+    return [str(x) for x in result]
+
+
+def _correct_transcript(segments: List[Dict]) -> List[Dict]:
+    """在拿到 segments 后整体纠错，原地修改 text；任一批失败则保留该批原文（不丢数据）"""
+    glossary = _load_glossary()
+    if not glossary['terms'] and not glossary['corrections']:
+        return segments
+
+    # 按字符预算分批，控制单次调用体积与对齐风险
+    char_budget, max_items = 4000, 60
+    batches: List[List[int]] = []
+    cur: List[int] = []
+    cur_chars = 0
+    for i, s in enumerate(segments):
+        ln = len(s['text'])
+        if cur and (cur_chars + ln > char_budget or len(cur) >= max_items):
+            batches.append(cur)
+            cur, cur_chars = [], 0
+        cur.append(i)
+        cur_chars += ln
+    if cur:
+        batches.append(cur)
+
+    fixed_count = 0
+    for batch in batches:
+        texts = [segments[i]['text'] for i in batch]
+        try:
+            corrected = _correct_batch(texts, glossary)
+        except Exception as e:
+            logger.warning(f'专有名词纠错批次失败，保留原文: {e}')
+            continue
+        for i, new_text in zip(batch, corrected):
+            if new_text != segments[i]['text']:
+                fixed_count += 1
+            segments[i]['text'] = new_text
+
+    logger.info(f'专有名词纠错完成：{len(batches)} 批，修正 {fixed_count} 段')
+    return segments
 
 
 # ────────────────────────────────────────────────
@@ -660,6 +759,9 @@ async def handle_video(
             }
 
         lang = lang or 'zh'
+
+        # 3.5 专有名词纠错（还原 ASR 误识别，贯穿后续段落/关键帧/翻译/Markdown）
+        segments = _correct_transcript(segments)
 
         # 4. 段落化
         paragraphs = _segment_paragraphs(segments)

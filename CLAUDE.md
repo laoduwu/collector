@@ -50,6 +50,16 @@ Webhook接收器需要从消息中**提取第一个有效URL**，忽略其余文
 - 媒体文档无图片流程（跳过图片下载/上传/CDN 步骤）
 - 降级策略: 媒体提取失败时自动降级为 Playwright 文章抓取
 
+### 专有名词转录纠错与维护
+
+Whisper 会概率性把专有名词听错（如 Claude→Clark、Codex→CodeX、Trae→trace）。`src/video_processor.py` 用两层纠错处理：
+- 第一层 `_whisper_prompt()`：把术语表拼成 prompt 传给 Whisper，源头偏置识别。
+- 第二层 `_correct_transcript()`：转录后用 LLM 按上下文还原（不盲替换，避免误伤合法词）。
+
+**维护规则**：后续再发现新的误识别，只需往 `src/glossary.json` 里加词，**不要改代码**：
+- `terms`：专有名词的正确写法（两层共用）。
+- `corrections`：已知的「错误写法 → 正确写法」映射（仅作 LLM 提示）。
+
 ### Bilibili 反爬处理
 
 B 站对非中国 IP 返回 HTTP 412，要求完成 JS 验证挑战生成验证 cookie。

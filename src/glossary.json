@@ -1,0 +1,29 @@
+{
+  "_comment": "音视频转录专有名词术语表。terms：正确写法（同时用于 Whisper prompt 偏置与 LLM 纠错上下文）。corrections：已知的高频误识别映射（错误写法 → 正确写法），仅作为提示，LLM 仍按上下文判断。往里加词即可，无需改代码。",
+  "terms": [
+    "Claude",
+    "Codex",
+    "Trae",
+    "Cursor",
+    "Anthropic",
+    "OpenAI",
+    "ChatGPT",
+    "Gemini",
+    "GPT",
+    "Copilot",
+    "Whisper",
+    "Sora",
+    "Midjourney",
+    "Hugging Face",
+    "LangChain",
+    "Obsidian",
+    "Supabase",
+    "Vercel",
+    "Notion"
+  ],
+  "corrections": {
+    "Clark": "Claude",
+    "CodeX": "Codex",
+    "trace": "Trae"
+  }
+}
